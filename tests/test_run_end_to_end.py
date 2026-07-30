@@ -62,42 +62,36 @@ async def _schema() -> Any:
 @pytest.mark.parametrize("pattern", ["single_agent_baseline", "reason_act"])
 async def test_full_run(pattern: str) -> None:
     """A run executes end to end and persists its steps."""
-    from sqlalchemy import func, select
-
-    from agentic_core.models.database import system_session
-    from agentic_core.models.run import RunStatus, RunStep
-    from agentic_core.runner import create_agent, create_run, execute_run
+    from agentic_core.models.run import RunStatus
+    from agentic_core.runner import create_agent, create_run, execute_run, get_run, get_run_steps
 
     stub = StubLLM()
-    async with system_session(reason="test_full_run") as db:
-        agent = await create_agent(
-            db,
-            name=f"test-{pattern}-{uuid.uuid4().hex[:8]}",
-            goal="Answer the question.",
-            model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
-            pattern_config={"execution_pattern": pattern},
-        )
-        run = await create_run(db, agent_id=agent.id, user_input="What is 2 + 2?")
-        assert run.status is RunStatus.PENDING
+    # No session anywhere: core owns its database and manages its own connections.
+    agent = await create_agent(
+        name=f"test-{pattern}-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        pattern_config={"execution_pattern": pattern},
+    )
+    run = await create_run(agent_id=agent.id, user_input="What is 2 + 2?")
+    assert run.status is RunStatus.PENDING
 
-        result = await execute_run(db, run_id=run.id, llm_service=stub)
+    result = await execute_run(run_id=run.id, llm_service=stub)
 
-        assert result.error is None, result.error
-        assert RunStatus(result.status) is RunStatus.COMPLETED
-        assert result.output, "the run produced no output"
-        assert stub.calls, "the LLM was never called — the loop did not run"
+    assert result.error is None, result.error
+    assert RunStatus(result.status) is RunStatus.COMPLETED
+    assert result.output, "the run produced no output"
+    assert stub.calls, "the LLM was never called — the loop did not run"
 
-        # Steps are persisted, not merely returned.
-        n = (
-            await db.execute(select(func.count()).select_from(RunStep).where(RunStep.run_id == run.id))
-        ).scalar()
-        assert n and n > 0, "no RunStep rows were written"
+    # Steps are persisted, not merely returned — read back through core's API.
+    assert await get_run_steps(run.id), "no RunStep rows were written"
 
-        # And the outcome landed on the run row.
-        await db.refresh(run)
-        assert RunStatus(run.status) is RunStatus.COMPLETED
-        assert run.token_usage["prompt_tokens"] > 0
-        assert run.completed_at is not None
+    # And the outcome landed on the run row.
+    stored = await get_run(run.id)
+    assert stored is not None
+    assert RunStatus(stored.status) is RunStatus.COMPLETED
+    assert stored.token_usage["prompt_tokens"] > 0
+    assert stored.completed_at is not None
 
 
 async def test_registry_holds_exactly_the_migrated_patterns() -> None:

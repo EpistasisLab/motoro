@@ -1,20 +1,18 @@
 #!/usr/bin/env python3
 """ONE-TIME SETUP — provision an agent. Run once, keep the id.
 
-An agent is a durable, reusable resource: you create it once and start many runs
-against it. This is the shape a product wants — an admin action, a seed script, a
-CI task — not something on the request path. Creating an agent per run
-accumulates junk and, because names are unique per installation over live rows,
-fails outright the second time.
+An agent is a durable, reusable resource: create it once, start many runs against
+it. That is an admin action, a seed script, a CI task — never the request path.
 
-The schema is **not** provisioned here. That is a separate deploy step:
+Note what is *not* here: no session, no core models, no schema. Core owns its own
+database. The schema is applied separately, once, as a deploy step::
 
     python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"
 
 Usage::
 
     set -a && . ./.env && set +a
-    python examples/provision.py                       # prints the agent id
+    python examples/provision.py
     python examples/provision.py --pattern single_agent_baseline
 """
 
@@ -22,11 +20,11 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import sys
 
-from settings import Settings  # the product's settings class — see settings.py
+from settings import Settings
 
 from agentic_core import configure
+from agentic_core.runner import create_agent, get_agent_by_name
 from agentic_core.schemas.agent import LLMProvider, ModelConfig
 
 
@@ -41,63 +39,35 @@ async def main() -> int:
 
     configure(Settings())
 
-    from agentic_core.migrations import current_revision
-    from agentic_core.models.database import system_session
-    from agentic_core.runner import create_agent
-
-    # Verify, don't migrate — and note this is a *setup-script* concern, not
-    # something feature code ever does. A product that silently migrates on
-    # startup races its own replicas; one that assumes the schema is present
-    # fails with an unreadable SQL error. Checking once is the middle ground.
-    if await current_revision() is None:
-        print(
-            "!! schema not provisioned. Run the deploy step first:\n"
-            '   python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"',
-            file=sys.stderr,
-        )
-        return 1
-
     name = args.name or f"example-{args.pattern}"
-    provider = LLMProvider(args.provider)
 
+    # Idempotent by name. Agent names are unique per installation over live rows,
+    # so a second invocation would otherwise fail the constraint — and a seed
+    # script that cannot be re-run safely is one people avoid running.
+    existing = await get_agent_by_name(name)
+    if existing is not None:
+        print(f"agent already provisioned: {existing.id}  ({existing.name})")
+        print(f"\nStart runs with:\n  python examples/run.py --agent-id {existing.id} --input '...'")
+        return 0
+
+    provider = LLMProvider(args.provider)
     # No api_key here on purpose: it is `exclude=True`, so it would not survive
-    # being persisted with the agent. The credential is resolved at call time
-    # from settings — see agentic_core.services.credentials.
+    # being persisted with the agent. Credentials resolve at call time from
+    # settings — see agentic_core.services.credentials.
     model_config = ModelConfig(provider=provider, model=args.model, max_tokens=2048)
 
-    async with system_session(reason="examples/provision.py") as db:
-        # Idempotent by name. Agent names are unique per installation over live
-        # rows, so a second invocation would otherwise fail on the constraint —
-        # and a seed script that cannot be re-run safely is a seed script people
-        # avoid running. Report the existing agent instead.
-        from sqlalchemy import func, select
-
-        from agentic_core.models.agent import Agent
-
-        existing = (
-            await db.execute(
-                select(Agent).where(func.lower(Agent.name) == name.lower(), Agent.deleted_at.is_(None))
-            )
-        ).scalar_one_or_none()
-        if existing is not None:
-            print(f"agent already provisioned: {existing.id}")
-            print(f"  name: {existing.name}")
-            print(f"\nStart runs with:\n  python examples/run.py --agent-id {existing.id} --input '...'")
-            return 0
-
-        agent = await create_agent(
-            db,
-            name=name,
-            goal=args.goal,
-            description="Example agent for the agentic-core smoke test.",
-            model_config=model_config,
-            pattern_config={"execution_pattern": args.pattern},
-        )
-        print(f"agent provisioned: {agent.id}")
-        print(f"  name:    {agent.name}")
-        print(f"  pattern: {args.pattern}")
-        print(f"  model:   {provider.value} / {args.model}")
-        print(f"\nStore that id. Start runs with:\n  python examples/run.py --agent-id {agent.id} --input '...'")
+    agent = await create_agent(
+        name=name,
+        goal=args.goal,
+        description="Example agent for the agentic-core smoke test.",
+        model_config=model_config,
+        pattern_config={"execution_pattern": args.pattern},
+    )
+    print(f"agent provisioned: {agent.id}")
+    print(f"  name:    {agent.name}")
+    print(f"  pattern: {args.pattern}")
+    print(f"  model:   {provider.value} / {args.model}")
+    print(f"\nStore that id. Start runs with:\n  python examples/run.py --agent-id {agent.id} --input '...'")
     return 0
 
 

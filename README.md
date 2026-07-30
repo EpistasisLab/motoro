@@ -18,7 +18,7 @@ The scope decisions and the boundary contract live in ARES under
 **A run executes end to end.** Create an agent, create a run, execute it under
 either of the two migrated execution patterns.
 
-61 files / 11,055 LOC — about 15% of the ARES backend. 26 tests pass against a
+61 files / 11,055 LOC — about 15% of the ARES backend. 35 tests pass against a
 real Postgres, including full Sense→Reason→Plan→Act runs under both patterns.
 
 | Landed | |
@@ -28,8 +28,8 @@ real Postgres, including full Sense→Reason→Plan→Act runs under both patter
 | Patterns | `single_agent_baseline`, `reason_act` — **2 of 37**, added one at a time |
 | LLM bridge | `llm_service` + a pluggable credential resolver |
 | MCP | `client`, `registry`, `adapters` |
-| Persistence | 5 tables, own Alembic chain (`agentic_core.migrations`) |
-| Composition root | `agentic_core.runner` — `create_agent`, `create_run`, `execute_run` |
+| Persistence | 5 tables, own Alembic chain, own database, own sessions |
+| Composition root | `agentic_core.runner` — writes (`create_agent`, `create_run`, `execute_run`) and reads (`get_agent`, `get_run`, `get_runs`, `list_runs`, `get_run_steps`, …) |
 | Observability | tracing + metrics, with a configurable instrument prefix |
 
 Not yet here: the other 35 patterns, semantic/episodic memory, the worker, the
@@ -55,13 +55,12 @@ Consequences, each of which is a decision rather than an omission:
   Both are `NOT NULL` in ARES, so importing them would mean core could not store
   an agent or a run without a user.
 
-A product that wants ownership adds it on its own side. The recommended shape is
-an opaque, nullable, un-constrained `owner_id` on the core model, with the
-product's migration supplying the foreign key, the `NOT NULL`, and any per-owner
-unique constraint. The column is declared in core rather than added purely by a
-product migration for a mechanical reason: core's Alembic autogenerate diffs
-against `Base.metadata`, so a column in the database but absent from core's model
-is one core proposes to **drop**.
+A product that wants ownership keeps its `users` table in its own database and
+passes an **opaque, nullable, un-constrained `owner_id`** to `create_agent` /
+`create_run`. Core stores and filters on it (`list_agents(owner_id=...)`) and
+never resolves it — it is a `UUID`, not a foreign key, and cannot become one:
+`users` lives in a different database. Enforcing that the owner exists is the
+product's job, on its own side of the boundary.
 
 ### Deliberately excluded from slice 1
 
@@ -195,38 +194,61 @@ subclass with the product's env prefix.
 every replica races the same migration, an API and a worker both try to migrate,
 and for a window old and new code run against a half-migrated schema — and a
 migration failure becomes a crash-looping app instead of a failed deploy you can
-read. So core ships a CLI and *does not* migrate for you. An application should
-**verify** the schema and refuse to start if it is behind; both example scripts do
-that with `migrations.current_revision()`.
+read. So core ships a CLI and *does not* migrate for you. If a product wants to
+refuse to serve against a schema that is behind, `migrations.current_revision()`
+belongs once in its startup path — not in a request, and not in the examples,
+because a feature developer should never have to think about core's schema.
 
 **`create_run` and `execute_run` are separate calls** so a product can enqueue
 execution rather than block on it: create the run in the request, return the id,
 let a worker execute it. `examples/run.py` does both inline because it is a CLI —
 that is the one thing a real product would change.
 
-**The product owns the database connection.** Core never opens a session on its
-own: every public entry point takes `db: AsyncSession` as its first argument, and
-where that comes from is yours — a FastAPI `Depends(get_db)`, your own
-`async_sessionmaker`, whatever your framework already manages. `system_session`
-is only core's convenience for contexts with *no* request to scope to (a CLI, a
-worker, a cron job); a web app would not use it.
+### Two databases: core owns its own, entirely
 
-Core does own the *engine* by default — `get_engine()` reads
-`CoreSettings.database_url` — so that core and product models, which share one
-`Base` and one database, share one connection pool instead of opening two. A
-product may ignore it entirely and hand in sessions from its own engine.
+**Core manages its own database. A product never touches it.** No session
+appears anywhere in the code above — no `AsyncSession` parameter, no
+`system_session`, no `Depends(get_db)`. A product configures
+`database_url` once through settings and then only calls functions. Core opens,
+commits, and closes its own connections.
 
-> One caveat as more patterns land: 21 of ARES's 37 pattern plugins open their own
-> sessions via `models.database`. Neither of the two migrated so far does — they
-> use the session the runtime was handed — so "core never opens a session" holds
-> today and will need revisiting when the coordination patterns arrive.
+That means **two databases**, not one:
 
-**Schema checks are a startup concern, not a per-request one.** A feature
-developer never touches `migrations.current_revision()`. It belongs once in the
-app's startup path, to refuse to serve against a schema that is behind, and the
-examples put it in a clearly-labelled startup section for that reason.
+| | Core's database | The product's database |
+|---|---|---|
+| Contains | agents, runs, steps, and core's own tables | the product's domain tables |
+| Schema applied by | `python -m agentic_core.migrations upgrade` | the product's own Alembic chain |
+| Reached through | core's function API only | the product's own sessions |
 
-Verified end to end from an empty database: refuse → migrate → provision → run.
+So that products never need to query core's tables to read their own data back,
+the runner exposes reads as well as writes: `get_agent`, `get_agent_by_name`,
+`list_agents`, `get_run`, `get_runs`, `list_runs`, `get_run_steps`. Returned ORM
+objects are usable after core closes its session — core's sessionmaker sets
+`expire_on_commit=False` — so a product can read `run.status` and
+`run.token_usage` without a live connection.
+
+**This costs three things, and they are real:**
+
+1. **No cross-database foreign keys.** A product row that refers to a run stores
+   an opaque `UUID` with no `ForeignKey`, so the database will not enforce that
+   the run exists or cascade its deletion. Measured for ARES: 46 foreign keys
+   point into `agents` / `agent_runs` / `run_steps`, but only **5 of them, across
+   3 tables** (`plan`, `discovery`, `research_experiment`), are product-side. The
+   other 24 tables are core's own and keep their constraints intact.
+2. **No cross-database joins.** Instead of joining product rows against
+   `agent_runs`, a product collects run ids and calls `get_runs(ids)` — one extra
+   round trip, and an N+1 if written carelessly. That is why `get_runs` takes a
+   collection rather than making callers loop.
+3. **No cross-database transactions.** Writing a product row and a core run is
+   two commits, not one, so a crash between them leaves the product row pointing
+   at nothing (or nothing pointing at a run). Products that care need a
+   reconciliation path — an unreferenced run is the safer of the two orderings.
+
+The trade this buys: core can change its schema, its session strategy, its
+connection pooling, and its transaction boundaries without a product noticing,
+and no product can corrupt core's tables by writing them directly.
+
+Verified end to end from an empty database: migrate → provision → run.
 
 ### Setting a provider
 
@@ -275,26 +297,27 @@ they are:
 
 | | Core owns | Product owns |
 |---|---|---|
-| Postgres | the **schema** — five tables and their migration chain | the server, credentials, deployment |
+| Postgres | the **database** — its schema, its migration chain, and every session against it | the server, credentials, deployment |
 | Redis | the key layout for per-run working memory | the server, credentials, deployment |
 
-A product provisions the instances and applies core's schema **before** its own
-migrations, since product tables routinely carry foreign keys into `agents` and
-`agent_runs` and the reverse is forbidden:
+A product provisions the instances, points `database_url` at a database for core,
+and applies core's schema to it as a deploy step. Its own chain runs against its
+own database, and the two are independent — no ordering constraint between them,
+because there are no foreign keys across the boundary:
 
-```python
-from agentic_core.migrations import upgrade
-upgrade()                      # core's tables, at head  (or: await upgrade_async())
-# ...then the product's own `alembic upgrade head`
+```bash
+python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"   # core's DB
+alembic upgrade head                                                     # the product's own DB
 ```
 
 Core's chain lives **inside the package** (`src/agentic_core/migrations/`) so a
 pip-installed core can still be migrated, and stamps
-`alembic_version_agentic_core` rather than `alembic_version` — so a product's
-chain runs alongside it and neither stamps over the other. Autogenerate is
-filtered to core's five tables, because core and a product share one
-`Base.metadata` and without the filter core would propose dropping every product
-table.
+`alembic_version_agentic_core` rather than `alembic_version`. Both of those still
+matter even with separate databases: the version table name keeps a
+*co-located* deployment — the two chains pointed at one database, which core does
+not require but does not forbid — from stamping over each other, and autogenerate
+stays filtered to core's tables because core and a product share one
+`Base.metadata` in the same Python process regardless of where the rows live.
 
 `runner.init_schema()` (`create_all`) remains for tests and scratch work. It is
 **not** the production path — nothing is version-tracked. A test asserts the two
