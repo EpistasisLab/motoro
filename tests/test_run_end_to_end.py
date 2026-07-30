@@ -74,7 +74,7 @@ async def test_full_run(pattern: str) -> None:
             db,
             name=f"test-{pattern}-{uuid.uuid4().hex[:8]}",
             goal="Answer the question.",
-            model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-4-6", api_key="stub"),
+            model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
             pattern_config={"execution_pattern": pattern},
         )
         run = await create_run(db, agent_id=agent.id, user_input="What is 2 + 2?")

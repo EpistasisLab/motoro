@@ -85,11 +85,6 @@ _REGISTRY: dict[str, ModelCapabilities] = {
     "claude-opus-4-7": _EFFORT_ONLY,
     "claude-fable-5": _EFFORT_ONLY,
     "claude-sonnet-5": _EFFORT_ONLY,
-    # Sonnet 4.6 accepts BOTH temperature and effort on the wire (it does not 400
-    # on temperature, unlike the pure adaptive-thinking models above). We register
-    # it as effort-only by choice so the effort dial is exposed uniformly across
-    # the Sonnet and Opus tiers; the binary capability model can surface only one.
-    "claude-sonnet-4-6": _EFFORT_ONLY,
 }
 
 
@@ -140,7 +135,6 @@ CATALOG: list[ModelCatalogEntry] = [
     _entry("anthropic", "claude-opus-4-7", "Claude Opus 4.7"),
     _entry("anthropic", "claude-fable-5", "Claude Fable 5"),
     _entry("anthropic", "claude-sonnet-5", "Claude Sonnet 5"),
-    _entry("anthropic", "claude-sonnet-4-6", "Claude Sonnet 4.6"),
     _entry("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5"),
     _entry("openai", "gpt-4o", "GPT-4o"),
     _entry("openai", "gpt-4o-mini", "GPT-4o Mini"),

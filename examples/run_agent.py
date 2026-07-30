@@ -9,9 +9,9 @@ points is the cheapest thing that fails loudly when core secretly needs a produc
 Usage::
 
     cp .env.example .env && docker compose up -d
-    set -a && . ./.env && set +a
-    export ANTHROPIC_API_KEY='sk-ant-...'
+    set -a && . ./.env && set +a          # provider credentials live in .env
     python examples/run_agent.py --pattern reason_act
+    python examples/run_agent.py --provider azure_foundry
 
     # or, without spending anything:
     python examples/run_agent.py --dry-run
@@ -38,6 +38,36 @@ class Settings(CoreSettings):
     model_config = SettingsConfigDict(env_prefix="AGENTIC_", env_file=".env", extra="ignore")
 
 
+async def get_or_create_agent(db: object, *, name: str, model_config: object, **kw: object) -> object:
+    """Fetch the agent named *name*, or create it; keep its config current.
+
+    Reuse rather than create-per-run for two reasons. Agent names are unique per
+    installation over live rows (``uq_agents_name_active``), so a second run with
+    a fixed name violates that constraint. And an agent is meant to be a durable,
+    reusable resource — a fresh one per invocation accumulates junk and defeats
+    the point.
+
+    The stored model config is refreshed on reuse so ``--model`` / ``--provider``
+    actually take effect instead of silently running the config from whenever the
+    agent was first created.
+    """
+    from sqlalchemy import func, select
+
+    from agentic_core.models.agent import Agent
+    from agentic_core.runner import create_agent
+
+    existing = (
+        await db.execute(  # type: ignore[attr-defined]
+            select(Agent).where(func.lower(Agent.name) == name.lower(), Agent.deleted_at.is_(None))
+        )
+    ).scalar_one_or_none()
+    if existing is not None:
+        existing.model_config_data = model_config.model_dump(mode="json")  # type: ignore[attr-defined]
+        await db.commit()  # type: ignore[attr-defined]
+        return existing
+    return await create_agent(db, name=name, model_config=model_config, **kw)  # type: ignore[arg-type]
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument(
@@ -53,7 +83,7 @@ async def main() -> int:
         help="anthropic reads ANTHROPIC_API_KEY; azure_foundry reads "
         "ANTHROPIC_FOUNDRY_API_KEY + ANTHROPIC_FOUNDRY_RESOURCE",
     )
-    ap.add_argument("--model", default="claude-sonnet-4-6")
+    ap.add_argument("--model", default="claude-sonnet-5")
     ap.add_argument("--goal", default="Answer the user's question accurately and concisely.")
     ap.add_argument("--input", default="What is 17 * 23? Show your reasoning briefly.")
     ap.add_argument("--reset", action="store_true", help="roll the schema back to base and re-migrate first")
@@ -67,7 +97,7 @@ async def main() -> int:
     #    (runner.init_schema / create_all also works, but is for tests — it leaves
     #    the schema unversioned.)
     from agentic_core.migrations import current_revision, downgrade, upgrade_async
-    from agentic_core.runner import create_agent, create_run, execute_run
+    from agentic_core.runner import create_run, execute_run
 
     if args.reset and await current_revision() is not None:
         await asyncio.to_thread(downgrade, None, "base")
@@ -107,7 +137,11 @@ async def main() -> int:
     from agentic_core.models.database import system_session
 
     async with system_session(reason="examples/run_agent.py") as db:
-        agent = await create_agent(
+        # Agents are persistent: create once, then start many runs against the
+        # same one. Names are unique per installation over live rows, so a script
+        # that blindly creates on every invocation fails the second time — and
+        # accumulating a new agent per run would be the wrong shape anyway.
+        agent = await get_or_create_agent(
             db,
             name=f"example-{args.pattern}",
             goal=args.goal,
@@ -115,7 +149,7 @@ async def main() -> int:
             model_config=model_config,
             pattern_config={"execution_pattern": args.pattern},
         )
-        print(f"agent created: {agent.id}  pattern={args.pattern}")
+        print(f"agent:         {agent.id}  pattern={args.pattern}")
 
         run = await create_run(db, agent_id=agent.id, user_input=args.input)
         print(f"run created:   {run.id}  status={run.status.value}")

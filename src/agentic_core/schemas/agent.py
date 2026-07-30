@@ -32,7 +32,7 @@ class ModelConfig(BaseModel):
     """LLM model configuration."""
 
     provider: LLMProvider = LLMProvider.ANTHROPIC
-    model: str = "claude-sonnet-4-6"
+    model: str = "claude-sonnet-5"
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
         default=None,

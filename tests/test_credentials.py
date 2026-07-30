@@ -69,7 +69,7 @@ def test_api_key_does_not_survive_persistence() -> None:
     rebuilds from it, so a credential set at agent-creation time is gone by the
     time the provider is called. This is why a resolver exists.
     """
-    cfg = ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-4-6", api_key="secret")
+    cfg = ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="secret")
     assert cfg.api_key == "secret"
     assert ModelConfig(**cfg.model_dump(mode="json")).api_key is None
 
@@ -101,10 +101,10 @@ async def test_credentials_read_bare_env_names_despite_product_prefix() -> None:
 async def test_foundry_resolves_key_base_and_model_prefix() -> None:
     _configure(anthropic_foundry_api_key="fk", anthropic_foundry_resource="res")
     conn = await env_credential_resolver(
-        ModelConfig(provider=LLMProvider.AZURE_FOUNDRY, model="claude-sonnet-4-6")
+        ModelConfig(provider=LLMProvider.AZURE_FOUNDRY, model="claude-sonnet-5")
     )
     assert conn == {
-        "model": "azure_ai/claude-sonnet-4-6",
+        "model": "azure_ai/claude-sonnet-5",
         "api_key": "fk",
         "api_base": "https://res.services.ai.azure.com",
         # Claude on Foundry goes through the Anthropic passthrough, which 404s
