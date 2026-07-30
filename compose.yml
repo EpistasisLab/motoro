@@ -13,7 +13,8 @@
 # Core is a headless library — no FastAPI app, no worker entrypoint — so there is
 # nothing here to run it *as*. If a `backend:` or `api:` service ever appears in
 # this file, the boundary has slipped: that belongs to whichever product is
-# consuming core.
+# consuming core. `agentic-core-migrate` is not that: the schema *is* core's, so
+# applying it is core's job. It runs once and exits; it does not serve anything.
 #
 # Ports are deliberately offset from the ARES stack (5452/6379/6380) and the
 # surgical stack (6432) so all of them can run at once.
@@ -50,6 +51,36 @@ services:
       timeout: 5s
       retries: 10
     restart: unless-stopped
+
+  # Applies core's schema, then exits 0. `docker compose up` brings the database
+  # up *migrated* — there is no separate command to remember.
+  #
+  # This does not contradict "migrations are a deploy step, not app startup": a
+  # one-shot init container that runs to completion and gates what follows is
+  # exactly the deploy-step shape. What races is migrating from inside N
+  # application replicas on a rolling deploy, and this is a single container with
+  # nothing to roll.
+  #
+  # It appears as `Exited (0)` in `docker compose ps`. That is success, not a
+  # crashed service — hence `restart: "no"`, which stops Compose from treating a
+  # completed job as something to revive.
+  agentic-core-migrate:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.migrate
+    container_name: agentic-core-migrate
+    depends_on:
+      # Not `service_started`: Postgres's entrypoint accepts connections briefly
+      # while still running initdb, so starting on that signal races the creation
+      # of the database being migrated.
+      agentic-core-postgres:
+        condition: service_healthy
+    environment:
+      # The service hostname and 5432 — the *container* network. 5453 is the host
+      # port mapping and means nothing in here. Bare DATABASE_URL, because the
+      # CLI configures a plain CoreSettings with no product prefix.
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentic}:${POSTGRES_PASSWORD:-agentic}@agentic-core-postgres:5432/${POSTGRES_DB:-agentic_core}
+    restart: "no"
 
   agentic-core-redis:
     # Required, with a graceful-degradation path rather than a hard failure:

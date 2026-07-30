@@ -160,7 +160,7 @@ mechanical pass and quietly makes core impersonate a product.
 
 ```bash
 cp .env.example .env
-docker compose up -d                    # postgres :5453, redis :6381
+docker compose up -d                    # postgres :5453, redis :6381, schema applied
 
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
 set -a && . ./.env && set +a
@@ -178,6 +178,8 @@ matters: only the third belongs on a request path.
 
 ```bash
 # ── 1. DEPLOY STEP — once per release, before the app starts ────────────────
+docker compose up -d                    # the agentic-core-migrate service does this
+# ...or, without Compose:
 python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"
 
 # ── 2. PROVISIONING — once; agents are durable resources ───────────────────
@@ -194,10 +196,38 @@ subclass with the product's env prefix.
 every replica races the same migration, an API and a worker both try to migrate,
 and for a window old and new code run against a half-migrated schema — and a
 migration failure becomes a crash-looping app instead of a failed deploy you can
-read. So core ships a CLI and *does not* migrate for you. If a product wants to
-refuse to serve against a schema that is behind, `migrations.current_revision()`
-belongs once in its startup path — not in a request, and not in the examples,
-because a feature developer should never have to think about core's schema.
+read. If a product wants to refuse to serve against a schema that is behind,
+`migrations.current_revision()` belongs once in its startup path — not in a
+request, and not in the examples, because a feature developer should never have to
+think about core's schema.
+
+`agentic-core-migrate` is that deploy step, not an exception to it: a **one-shot
+init container** that waits for Postgres to be healthy, applies the schema, and
+exits 0. One container, running to completion, gating what follows — there is
+nothing to race. `docker compose up -d` therefore brings the database up
+*migrated*, with no second command to remember. It shows as `Exited (0)` in
+`docker compose ps`, which is success. A product using its own orchestrator
+reproduces the shape with an init container, a Helm hook, or a release task.
+
+The image (`docker/Dockerfile.migrate`) installs core with `--no-deps` and five
+explicit dependencies, because applying the schema needs none of core's runtime —
+no litellm, no instructor, no mcp, no opentelemetry — which keeps it at ~264 MB
+rather than a gigabyte of unused inference machinery. A boundary test fails if a
+model or migration ever reaches for one of those, so the list going stale is a
+test failure rather than a broken deploy.
+
+**Every revision is re-runnable.** Four properties, each with a test:
+
+| Property | Why it can fail |
+|---|---|
+| `upgrade` twice is a no-op | Trivially true via the version table — pinned anyway, since a product may call it on every boot |
+| `downgrade` → `upgrade` reproduces the schema exactly | The real hazard. Autogenerate emits `CREATE TYPE` for a native enum but never the matching `DROP TYPE`, so the baseline could be migrated once and never again (`type "pattern_category" already exists`) |
+| `downgrade` leaves no orphan enum types | Dropping a table does not cascade to its enum — types are schema-level objects |
+| No revision uses `CONCURRENTLY` | Postgres has transactional DDL and Alembic wraps each revision, so a failed revision rolls back whole, version stamp included. `CONCURRENTLY` opts out of that and can leave a revision half-applied |
+
+The last two are static checks over every revision file, so a future migration
+cannot quietly reintroduce either. Both were mutation-tested — they fail when the
+enum drops are removed, and when a single enum is dropped from the list.
 
 **`create_run` and `execute_run` are separate calls** so a product can enqueue
 execution rather than block on it: create the run in the request, return the id,
@@ -337,9 +367,12 @@ nothing in that file to run it *as*. It exists so core's tests and examples have
 their own database and Redis rather than borrowing a product's. **If a `backend:`
 or `api:` service ever appears in it, the boundary has slipped.**
 
-- **Services are named `agentic-core-postgres` / `agentic-core-redis`**, not
-  `postgres` / `redis`, so a product merging or extending this file finds nothing
-  generic to collide with.
+- **Services are named `agentic-core-postgres` / `agentic-core-redis` /
+  `agentic-core-migrate`**, not `postgres` / `redis`, so a product merging or
+  extending this file finds nothing generic to collide with.
+- **`agentic-core-migrate` is the one non-service service**: it applies core's
+  schema and exits. Core owns the schema, so applying it is core's job — that is
+  not the same as core shipping an app. The invariant above still holds.
 - **Ports 5453 / 6381**, offset from the ARES stack (5452/6379/6380) and any
   other local stack, so they can all run at once.
 - **Two databases**: `agentic_core` for development, `agentic_core_test` for the

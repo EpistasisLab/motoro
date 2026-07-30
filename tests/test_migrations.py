@@ -208,3 +208,111 @@ def test_env_module_refuses_to_nest_event_loops() -> None:
 def test_asyncio_import_is_used() -> None:
     """Guard against the asyncio import being pruned by a linter."""
     assert asyncio is not None
+
+
+TYPES_SQL = """
+SELECT t.typname
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname = 'public' AND t.typtype = 'e'
+ORDER BY 1
+"""
+
+
+async def test_downgrade_then_upgrade_reproduces_the_schema(scratch_dbs: tuple[str, str]) -> None:
+    """A full down-and-up cycle lands on the identical schema.
+
+    This is the idempotency that actually bites. ``upgrade`` twice is guarded by
+    the version table and trivially safe; a *downgrade* that fails to reverse
+    everything is not. The baseline originally dropped its tables but not its
+    enum types, so the next upgrade died on ``type "pattern_category" already
+    exists`` — a database that could be migrated once and never again.
+    """
+    from agentic_core.migrations import current_revision, downgrade, upgrade_async
+
+    _, db = scratch_dbs
+    url = _url_for(db)
+
+    await upgrade_async(url)
+    head = await current_revision(url)
+    columns = await _introspect(db, COLUMNS_SQL)
+    indexes = await _introspect(db, INDEXES_SQL)
+    assert columns and indexes
+
+    await asyncio.to_thread(downgrade, url, "base")
+    assert await current_revision(url) is None
+    assert await _introspect(db, COLUMNS_SQL) == [], "downgrade left tables behind"
+
+    await upgrade_async(url)
+    assert await current_revision(url) == head
+    assert await _introspect(db, COLUMNS_SQL) == columns
+    assert await _introspect(db, INDEXES_SQL) == indexes
+
+
+async def test_downgrade_leaves_no_orphan_enum_types(scratch_dbs: tuple[str, str]) -> None:
+    """Types are schema too. A left-behind enum blocks the next upgrade."""
+    from agentic_core.migrations import downgrade, upgrade_async
+
+    _, db = scratch_dbs
+    url = _url_for(db)
+
+    await upgrade_async(url)
+    assert await _introspect(db, TYPES_SQL), "the chain should have created enum types"
+
+    await asyncio.to_thread(downgrade, url, "base")
+    leftover = await _introspect(db, TYPES_SQL)
+    assert leftover == [], f"downgrade left enum types behind: {leftover}"
+
+
+def test_every_revision_drops_the_enums_it_creates() -> None:
+    """Static guard, so the next revision cannot reintroduce the same bug.
+
+    The round-trip tests above catch this empirically, but only for revisions that
+    happen to be exercised. This reads every revision file and pairs each enum
+    created in ``upgrade()`` with a ``DROP TYPE`` in ``downgrade()``.
+    """
+    import re
+    from pathlib import Path
+
+    import agentic_core.migrations as m
+
+    versions = Path(m.__file__).parent / "versions"
+    offenders: list[str] = []
+    for path in sorted(versions.glob("*.py")):
+        src = path.read_text()
+        up, _, down = src.partition("def downgrade(")
+        created = set(re.findall(r"sa\.Enum\([^)]*?name=['\"](\w+)['\"]", up, re.S))
+        # Literal drops: `op.execute("DROP TYPE IF EXISTS run_status")`.
+        dropped = set(re.findall(r"DROP TYPE (?:IF EXISTS )?(\w+)", down))
+        # Plus loop drops, which is how the baseline does it. Scoped to the
+        # iterable of a loop whose body actually drops a type — crediting every
+        # quoted string in `downgrade` would let a table name vouch for an enum.
+        for iterable, body in re.findall(r"for \w+ in ([\(\[].*?[\)\]]):\n(.*?)(?=\n    \w|\Z)", down, re.S):
+            if "DROP TYPE" in body:
+                dropped |= set(re.findall(r"['\"](\w+)['\"]", iterable))
+        for name in sorted(created - dropped):
+            offenders.append(f"{path.name}: creates enum '{name}' but downgrade never drops it")
+    assert not offenders, "\n".join(offenders)
+
+
+def test_no_revision_uses_non_transactional_ddl() -> None:
+    """Every revision must be atomic, which is what makes a retry safe.
+
+    Postgres has transactional DDL and Alembic wraps each revision in a
+    transaction, so a revision that fails rolls back whole — including its version
+    stamp — leaving the database re-runnable. ``CONCURRENTLY`` opts out of that
+    guarantee: it cannot run in a transaction, so a failure mid-way leaves an
+    invalid index behind and the revision half-applied.
+
+    If core ever genuinely needs a concurrent index, this test should be replaced
+    with a documented exception, not deleted quietly.
+    """
+    from pathlib import Path
+
+    import agentic_core.migrations as m
+
+    versions = Path(m.__file__).parent / "versions"
+    offenders = [
+        f"{p.name}: uses CONCURRENTLY" for p in sorted(versions.glob("*.py")) if "CONCURRENTLY" in p.read_text().upper()
+    ]
+    assert not offenders, "\n".join(offenders)

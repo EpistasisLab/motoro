@@ -1,0 +1,27 @@
+# .env first and deliberately: it holds credentials and host-side URLs
+# (localhost:5453) that are wrong inside the compose network. It must not reach a
+# build context, where a stray COPY could bake it into an image.
+.env
+.env.*
+!.env.example
+
+.venv/
+.git/
+.gitignore
+
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+build/
+dist/
+
+# Not needed to apply a schema.
+tests/
+examples/
+scripts/
+docker/
+compose.yml
+CLAUDE.md

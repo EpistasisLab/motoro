@@ -111,10 +111,7 @@ def test_every_internal_import_resolves() -> None:
     This is what keeps a slice self-contained: a step is done when nothing in it
     reaches for a module that is still only in ARES.
     """
-    present = {
-        name
-        for _, name, _ in pkgutil.walk_packages([str(SRC)], prefix="agentic_core.")
-    } | {"agentic_core"}
+    present = {name for _, name, _ in pkgutil.walk_packages([str(SRC)], prefix="agentic_core.")} | {"agentic_core"}
     offenders: list[str] = []
     for path, text in _iter_source():
         for node in ast.walk(ast.parse(text)):
@@ -154,3 +151,51 @@ def test_configure_rejects_late_reconfiguration() -> None:
             configure(CoreSettings(otel_service_name="late"))
     finally:
         reset_for_testing()
+
+
+def test_migration_chain_stays_installable_without_runtime_deps() -> None:
+    """Applying the schema must not require core's runtime dependencies.
+
+    ``docker/Dockerfile.migrate`` installs core with ``--no-deps`` and an explicit
+    short list, because the migration chain reaches none of the heavy runtime
+    dependencies — no litellm, no instructor, no mcp, no opentelemetry. That keeps
+    the init container small, and it is only safe while it stays true. A model
+    that grows an import of one of these, or a migration that reaches for
+    ``structlog`` to log its progress, silently breaks the image; this fails
+    instead.
+
+    Run in a subprocess deliberately: this module's other tests import every core
+    module, so ``sys.modules`` in-process already contains litellm and would make
+    any in-process check pass vacuously.
+    """
+    import subprocess
+    import sys
+    import textwrap
+
+    forbidden = [
+        "litellm",
+        "instructor",
+        "mcp",
+        "opentelemetry",
+        "redis",
+        "httpx",
+        "structlog",
+        "jsonschema",
+        "tenacity",
+    ]
+    probe = textwrap.dedent(f"""
+        import importlib, sys
+        # Exactly what migrations/env.py imports to populate Base.metadata.
+        for m in ("agentic_core.models.agent", "agentic_core.models.pattern",
+                  "agentic_core.models.pricing", "agentic_core.models.run",
+                  "agentic_core.migrations"):
+            importlib.import_module(m)
+        tops = {{n.split(".")[0] for n in sys.modules}}
+        print(",".join(sorted(tops & set({forbidden!r}))))
+    """)
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+    pulled = [p for p in out.stdout.strip().split(",") if p]
+    assert not pulled, (
+        "the migration chain now imports runtime dependencies that "
+        "docker/Dockerfile.migrate does not install: " + ", ".join(pulled)
+    )
