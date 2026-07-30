@@ -1,7 +1,7 @@
-"""ARES normalized LLM error types.
+"""Normalized LLM error types.
 
 All litellm provider exception variants are mapped to one of these five
-ARES error classes so callers can handle them without importing litellm
+core error classes so callers can handle them without importing litellm
 directly.
 
 Usage::
@@ -23,7 +23,7 @@ import contextlib
 
 
 class LLMError(Exception):
-    """Base class for all normalized ARES LLM errors."""
+    """Base class for all normalized LLM errors."""
 
     def __init__(self, message: str, *, original: Exception | None = None) -> None:
         super().__init__(message)
@@ -63,7 +63,7 @@ class LLMAuthError(LLMError):
 
 
 class LLMTimeoutError(LLMError):
-    """Provider call timed out (either network or ARES-side asyncio deadline)."""
+    """Provider call timed out (either network or a local asyncio deadline)."""
 
 
 class LLMServerError(LLMError):
@@ -123,7 +123,7 @@ class LLMBudgetExceededError(LLMError):
 
 
 def normalize_llm_error(exc: Exception) -> LLMError:
-    """Convert a litellm exception into an ARES ``LLMError`` subclass.
+    """Convert a litellm exception into an ``LLMError`` subclass.
 
     If ``exc`` is already an ``LLMError`` it is returned unchanged.  For
     unknown exception types a generic ``LLMServerError`` is returned so
@@ -192,5 +192,5 @@ def normalize_llm_error(exc: Exception) -> LLMError:
             return LLMServerError(str(exc), original=exc)
 
     # Everything else (BadRequestError, UnprocessableEntityError, etc.) is a
-    # non-retryable server error from the perspective of ARES callers.
+    # non-retryable server error from the perspective of core callers.
     return LLMServerError(str(exc), original=exc)

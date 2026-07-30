@@ -1,4 +1,4 @@
-"""OpenTelemetry distributed tracing for ARES.
+"""OpenTelemetry distributed tracing.
 
 Each agent run is a trace; each phase (Sense/Reason/Plan/Act) is a child span.
 LLM calls and MCP tool calls are nested spans within their parent phase.
