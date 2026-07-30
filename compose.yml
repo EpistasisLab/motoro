@@ -1,0 +1,74 @@
+# The backing services agentic-core requires, for local development.
+#
+# Core needs both of these to function — they are a requirement, not a
+# convenience. What is *not* core's concern is whose server they run on: a
+# product provisions the instances, and this file is how core gets its own while
+# being developed and tested.
+#
+# So the division is:
+#   core     owns the schema (src/agentic_core/migrations) and the Redis key
+#            layout, and requires that both be present
+#   product  owns the servers, the credentials, and the deployment
+#
+# Core is a headless library — no FastAPI app, no worker entrypoint — so there is
+# nothing here to run it *as*. If a `backend:` or `api:` service ever appears in
+# this file, the boundary has slipped: that belongs to whichever product is
+# consuming core.
+#
+# Ports are deliberately offset from the ARES stack (5452/6379/6380) and the
+# surgical stack (6432) so all of them can run at once.
+#
+#   docker compose up -d
+#   docker compose down          # keep data
+#   docker compose down -v       # discard data
+
+services:
+  # Service keys are namespaced, not generic. A product that merges or extends
+  # this file must not find a bare `postgres:` here to collide with.
+  agentic-core-postgres:
+    # pgvector rather than plain postgres:16. Core does not need the extension
+    # today — none of its five tables uses a Vector column — but semantic memory
+    # will, and swapping the image later means recreating the volume. The image
+    # is a strict superset, so this costs nothing now.
+    image: pgvector/pgvector:pg16
+    container_name: agentic-core-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-agentic}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentic}
+      POSTGRES_DB: ${POSTGRES_DB:-agentic_core}
+    ports:
+      - "${POSTGRES_PORT:-5453}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      # Creates the separate test database on first boot. The test suite drops
+      # and recreates its schema per test, so it must not share a database with
+      # anything you want to keep.
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentic} -d ${POSTGRES_DB:-agentic_core}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  agentic-core-redis:
+    # Required, with a graceful-degradation path rather than a hard failure:
+    # AgentRuntime._create_working_memory pings Redis and logs "Redis unavailable
+    # — running without working memory" if it cannot reach it. A run still
+    # completes, but without per-run working memory, which is a degraded mode and
+    # not how core is meant to operate. Treat Redis as a service a product must
+    # provide, the same as Postgres.
+    image: redis:7-alpine
+    container_name: agentic-core-redis
+    ports:
+      - "${REDIS_PORT:-6381}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+    name: agentic_core_postgres_data

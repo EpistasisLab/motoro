@@ -15,20 +15,25 @@ The scope decisions and the boundary contract live in ARES under
 
 ## Status
 
-Slice 1 — the SRPA loop — in progress. **Step 0 of 6 landed.**
+**A run executes end to end.** Create an agent, create a run, execute it under
+either of the two migrated execution patterns.
 
-| Step | Contents | LOC | State |
-|---|---|---|---|
-| 0 | `config`, `models.base`, `observability.*`, `schemas.{llm,pattern}`, `security.prompt_injection`, `services.{credential_scrubber,llm_errors,model_capabilities,retry}` | 1,914 | ✅ |
-| 1 | `mcp.client`, `models.{agent,database,pricing,redis,run}`, `schemas.{agent,pricing}` | 1,390 | — |
-| 2 | `engine.context`, `mcp.registry`, `services.pricing_service` | 783 | — |
-| 3 | `engine.phase`, `mcp.adapters` | 612 | — |
-| 4 | `engine.runtime`, `engine.sense`, `services.llm_service` | 2,059 | — |
-| 5 | `engine.act`, `engine.plan`, `engine.reason` | 948 | — |
+61 files / 11,055 LOC — about 15% of the ARES backend. 26 tests pass against a
+real Postgres, including full Sense→Reason→Plan→Act runs under both patterns.
 
-Slice 1 totals **31 modules / 7,963 LOC** — 11% of the ARES backend. It has no
-dependency cycles, so the steps above are a strict order rather than a
-suggestion.
+| Landed | |
+|---|---|
+| SRPA loop | `runtime`, `sense`, `reason`, `plan`, `act`, `phase`, `context` |
+| Pattern engine | `base`, `registry`, `orchestrator`, `composition` |
+| Patterns | `single_agent_baseline`, `reason_act` — **2 of 37**, added one at a time |
+| LLM bridge | `llm_service` + a pluggable credential resolver |
+| MCP | `client`, `registry`, `adapters` |
+| Persistence | 5 tables, own Alembic chain (`agentic_core.migrations`) |
+| Composition root | `agentic_core.runner` — `create_agent`, `create_run`, `execute_run` |
+| Observability | tracing + metrics, with a configurable instrument prefix |
+
+Not yet here: the other 35 patterns, semantic/episodic memory, the worker, the
+evaluation and scoring subsystems, per-user isolation, users and auth.
 
 ### Core does not manage users
 
@@ -155,9 +160,85 @@ mechanical pass and quietly makes core impersonate a product.
 ## Development
 
 ```bash
+cp .env.example .env
+docker compose up -d                    # postgres :5453, redis :6381
+
 python -m venv .venv && .venv/bin/pip install -e '.[dev]'
+set -a && . ./.env && set +a
+
 .venv/bin/pytest
-.venv/bin/ruff check src tests
+.venv/bin/ruff check src tests scripts examples
 .venv/bin/mypy src
-.venv/bin/lint-imports          # core must never import a product
+.venv/bin/lint-imports                  # core must never import a product
 ```
+
+Then run an agent:
+
+```bash
+.venv/bin/python examples/run_agent.py --dry-run                 # no key needed
+.venv/bin/python examples/run_agent.py --pattern reason_act      # needs ANTHROPIC_API_KEY
+.venv/bin/python examples/run_agent.py --pattern single_agent_baseline
+```
+
+### Core's backing services are a requirement
+
+Core requires **PostgreSQL and Redis**. What it does not own is whose servers
+they are:
+
+| | Core owns | Product owns |
+|---|---|---|
+| Postgres | the **schema** — five tables and their migration chain | the server, credentials, deployment |
+| Redis | the key layout for per-run working memory | the server, credentials, deployment |
+
+A product provisions the instances and applies core's schema **before** its own
+migrations, since product tables routinely carry foreign keys into `agents` and
+`agent_runs` and the reverse is forbidden:
+
+```python
+from agentic_core.migrations import upgrade
+upgrade()                      # core's tables, at head  (or: await upgrade_async())
+# ...then the product's own `alembic upgrade head`
+```
+
+Core's chain lives **inside the package** (`src/agentic_core/migrations/`) so a
+pip-installed core can still be migrated, and stamps
+`alembic_version_agentic_core` rather than `alembic_version` — so a product's
+chain runs alongside it and neither stamps over the other. Autogenerate is
+filtered to core's five tables, because core and a product share one
+`Base.metadata` and without the filter core would propose dropping every product
+table.
+
+`runner.init_schema()` (`create_all`) remains for tests and scratch work. It is
+**not** the production path — nothing is version-tracked. A test asserts the two
+paths produce an identical schema, column for column and index for index, so they
+cannot silently diverge. To adopt migrations on a database created by
+`init_schema`, `migrations.stamp()` it at head.
+
+Redis is required with a *graceful-degradation* path rather than a hard failure:
+`AgentRuntime._create_working_memory` pings it and logs `"Redis unavailable —
+running without working memory"` if it cannot connect. A run still completes, but
+without per-run working memory — a degraded mode, not the intended one.
+
+### `compose.yml` is core's own instances, not a deployment
+
+Core is a headless library — no FastAPI app, no worker entrypoint — so there is
+nothing in that file to run it *as*. It exists so core's tests and examples have
+their own database and Redis rather than borrowing a product's. **If a `backend:`
+or `api:` service ever appears in it, the boundary has slipped.**
+
+- **Services are named `agentic-core-postgres` / `agentic-core-redis`**, not
+  `postgres` / `redis`, so a product merging or extending this file finds nothing
+  generic to collide with.
+- **Ports 5453 / 6381**, offset from the ARES stack (5452/6379/6380) and any
+  other local stack, so they can all run at once.
+- **Two databases**: `agentic_core` for development, `agentic_core_test` for the
+  suite — which drops and recreates its schema per test, so it must not share a
+  database with anything you want to keep. Created by
+  `docker/initdb/01-test-database.sql` on first boot of an empty volume.
+- **`pgvector/pgvector:pg16`**, even though core needs no `Vector` column today.
+  Semantic memory will, and the image is a strict superset, so paying now avoids
+  recreating the volume later.
+
+`testcontainers` is the better answer for CI (a throwaway database per session,
+nothing to remember to start), but it cannot give you a database to inspect
+between runs. Worth adding alongside this, not instead of it.
