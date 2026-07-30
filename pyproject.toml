@@ -1,0 +1,90 @@
+[project]
+name = "agentic-core"
+version = "0.0.1"
+description = "Headless agentic platform: the Sense-Reason-Plan-Act runtime, pattern engine, MCP integration, and memory."
+readme = "README.md"
+requires-python = ">=3.12"
+
+# Slice 1 (SRPA loop) dependencies only. Derived from the actual third-party
+# imports of the 31 modules in the slice — not copied wholesale from ARES.
+# Deliberately absent, and to stay absent unless a slice genuinely needs them:
+#   fastapi/uvicorn  — core is headless; the product owns the HTTP layer
+#   arq              — arrives with the worker slice
+#   pgvector, sentence-transformers — arrive with semantic memory
+#   python-docx, pymupdf, pyarrow   — dataset/document concerns, product-side
+#   bcrypt, email-validator         — auth concerns, undecided for core
+dependencies = [
+    "pydantic>=2.10.0",
+    "pydantic-settings>=2.14.1",
+    "sqlalchemy[asyncio]>=2.0.50",
+    "asyncpg>=0.30.0",
+    "redis>=5.2.0,<6",
+    # Range, not a pin. Core is a library: pinning an exact litellm would force
+    # it on every product and forbid interpreters that version excludes. ARES
+    # pins ==1.85.0, which is right for an application — but 1.85.0 requires
+    # Python <3.14, so an exact pin here would make core uninstallable on 3.14.
+    "litellm>=1.85.0",
+    "instructor>=1.15.1",
+    "tenacity>=9.0.0",
+    "mcp>=1.27.1",
+    "httpx>=0.28.1",
+    "jsonschema>=4.26.0",
+    "structlog>=24.4.0",
+    "opentelemetry-api>=1.42.0",
+    "opentelemetry-sdk>=1.41.1",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+    "opentelemetry-exporter-prometheus>=0.62b1",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.3",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.15.15",
+    "mypy>=2.1.0",
+    "import-linter>=2.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentic_core"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "N", "UP", "B", "SIM"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["agentic_core"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["litellm.*", "instructor.*", "mcp.*", "jsonschema.*", "prometheus_client.*", "grpc.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+# --------------------------------------------------------------------------- #
+# The boundary, enforced. Core must never import from a product package.
+# See ARES project_plan/AGENTIC_CORE_BOUNDARY.md §10.1.
+# --------------------------------------------------------------------------- #
+[tool.importlinter]
+root_packages = ["agentic_core"]
+
+[[tool.importlinter.contracts]]
+name = "Core never imports a product"
+type = "forbidden"
+source_modules = ["agentic_core"]
+forbidden_modules = ["ares", "ecoxai"]
