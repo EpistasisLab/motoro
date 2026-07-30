@@ -45,9 +45,10 @@ async def main() -> int:
     from agentic_core.models.database import system_session
     from agentic_core.runner import create_agent
 
-    # Verify, don't migrate. A product that silently migrates on startup races
-    # its own replicas; a product that assumes the schema is there fails with an
-    # unreadable SQL error. Checking is the middle ground.
+    # Verify, don't migrate — and note this is a *setup-script* concern, not
+    # something feature code ever does. A product that silently migrates on
+    # startup races its own replicas; one that assumes the schema is present
+    # fails with an unreadable SQL error. Checking once is the middle ground.
     if await current_revision() is None:
         print(
             "!! schema not provisioned. Run the deploy step first:\n"

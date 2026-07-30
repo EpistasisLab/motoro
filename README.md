@@ -204,6 +204,28 @@ execution rather than block on it: create the run in the request, return the id,
 let a worker execute it. `examples/run.py` does both inline because it is a CLI —
 that is the one thing a real product would change.
 
+**The product owns the database connection.** Core never opens a session on its
+own: every public entry point takes `db: AsyncSession` as its first argument, and
+where that comes from is yours — a FastAPI `Depends(get_db)`, your own
+`async_sessionmaker`, whatever your framework already manages. `system_session`
+is only core's convenience for contexts with *no* request to scope to (a CLI, a
+worker, a cron job); a web app would not use it.
+
+Core does own the *engine* by default — `get_engine()` reads
+`CoreSettings.database_url` — so that core and product models, which share one
+`Base` and one database, share one connection pool instead of opening two. A
+product may ignore it entirely and hand in sessions from its own engine.
+
+> One caveat as more patterns land: 21 of ARES's 37 pattern plugins open their own
+> sessions via `models.database`. Neither of the two migrated so far does — they
+> use the session the runtime was handed — so "core never opens a session" holds
+> today and will need revisiting when the coordination patterns arrive.
+
+**Schema checks are a startup concern, not a per-request one.** A feature
+developer never touches `migrations.current_revision()`. It belongs once in the
+app's startup path, to refuse to serve against a schema that is behind, and the
+examples put it in a clearly-labelled startup section for that reason.
+
 Verified end to end from an empty database: refuse → migrate → provision → run.
 
 ### Setting a provider
