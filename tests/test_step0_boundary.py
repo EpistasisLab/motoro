@@ -156,13 +156,15 @@ def test_configure_rejects_late_reconfiguration() -> None:
 def test_migration_chain_stays_installable_without_runtime_deps() -> None:
     """Applying the schema must not require core's runtime dependencies.
 
-    ``docker/Dockerfile.migrate`` installs core with ``--no-deps`` and an explicit
-    short list, because the migration chain reaches none of the heavy runtime
-    dependencies — no litellm, no instructor, no mcp, no opentelemetry. That keeps
-    the init container small, and it is only safe while it stays true. A model
-    that grows an import of one of these, or a migration that reaches for
-    ``structlog`` to log its progress, silently breaks the image; this fails
-    instead.
+    A layering property worth keeping: the schema is defined by models and
+    migrations, and neither should reach into the runtime. Concretely, it means
+    ``upgrade`` can run from an image holding nothing but Alembic, SQLAlchemy,
+    asyncpg and pydantic — no litellm, no instructor, no mcp, no opentelemetry.
+
+    ``docker/Dockerfile.migrate`` does *not* currently exploit that: it also runs
+    ``sync-catalog``, which imports every pattern plugin to read its metadata and
+    so needs the full runtime. This test is what makes splitting the image back
+    into a slim schema-only step a viable option rather than an investigation.
 
     Run in a subprocess deliberately: this module's other tests import every core
     module, so ``sys.modules`` in-process already contains litellm and would make

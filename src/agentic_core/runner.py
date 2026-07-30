@@ -132,6 +132,22 @@ def build_phases(
     }
 
 
+def _require_valid_pattern_config(pattern_config: dict[str, Any] | None) -> None:
+    """Raise if *pattern_config* would not run, checked against the registry.
+
+    Deliberately not a database lookup. ARES validates against the
+    ``architectural_patterns`` table, which means an unseeded table rejects every
+    agent — validation that depends on a data migration having run. The registry
+    is loaded in this process and cannot be out of date with the code.
+    """
+    from agentic_core.engine.patterns.catalog import PatternConfigError, validate_pattern_config
+
+    result = validate_pattern_config(pattern_config)
+    if not result.valid:
+        messages = [f"{e.field}: {e.message}" for e in result.errors]
+        raise PatternConfigError("Invalid pattern_config: " + "; ".join(messages), messages)
+
+
 # --------------------------------------------------------------------------- #
 #  Agents                                                                      #
 # --------------------------------------------------------------------------- #
@@ -153,7 +169,11 @@ async def create_agent(
 
     *pattern_config* selects the execution pattern, e.g.
     ``{"execution_pattern": "single_agent_baseline"}``. ``None`` means the
-    orchestrator's default, ``reason_act``.
+    orchestrator's default, ``reason_act``. It is validated against the pattern
+    registry and raises :class:`~agentic_core.engine.patterns.catalog.
+    PatternConfigError` if it names an unregistered pattern, misconfigures one, or
+    leaves a dependency unsatisfiable — so a typo fails here rather than after a
+    run has been created and a model billed.
 
     *owner_id* is stored verbatim and never interpreted — core has no users, and
     with a separate product database it could not have a foreign key to one.
@@ -162,6 +182,7 @@ async def create_agent(
     it would not survive being persisted here and rebuilt at run time. Credentials
     resolve per call — see :mod:`agentic_core.services.credentials`.
     """
+    _require_valid_pattern_config(pattern_config)
     agent = Agent(
         name=name,
         goal=goal,

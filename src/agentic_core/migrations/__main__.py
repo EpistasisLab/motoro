@@ -32,9 +32,35 @@ import asyncio
 import sys
 
 
+def _sync_catalog() -> str:
+    """Project the pattern registry into ``architectural_patterns``.
+
+    Unlike the Alembic commands, this cannot take a URL as an argument: it goes
+    through the service, which manages its own sessions off the configured
+    settings. ``main`` therefore installs ``--url`` into the settings up front
+    rather than mutating them here.
+    """
+    from agentic_core.services.pattern_catalog import sync_pattern_catalog
+
+    counts = asyncio.run(sync_pattern_catalog())
+    return (
+        f"sync-catalog -> {counts['inserted']} inserted, "
+        f"{counts['updated']} updated, {counts['stale']} unregistered rows left alone"
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="python -m agentic_core.migrations")
-    ap.add_argument("command", choices=["upgrade", "downgrade", "current", "stamp"])
+    ap.add_argument(
+        "command",
+        choices=["deploy", "upgrade", "downgrade", "current", "stamp", "sync-catalog"],
+        help=(
+            "deploy = upgrade then sync-catalog, the whole 'prepare core's database' step. "
+            "sync-catalog projects the pattern registry into architectural_patterns; it is data "
+            "rather than schema, but it belongs to the same deploy step, must run after the "
+            "schema exists, and is idempotent."
+        ),
+    )
     ap.add_argument(
         "--url",
         default=None,
@@ -51,12 +77,26 @@ def main(argv: list[str] | None = None) -> int:
     from agentic_core.migrations import current_revision, downgrade, stamp, upgrade
 
     # A bare CoreSettings reads DATABASE_URL (no product prefix) plus .env.
-    configure(CoreSettings())
+    # `--url` is installed here, before anything reads settings, so the two paths
+    # agree: Alembic takes the URL as an argument, while sync-catalog goes through
+    # a service that opens its own sessions off the settings.
     url = args.url  # None => make_config falls back to settings.database_url
+    configure(CoreSettings(database_url=url) if url else CoreSettings())
 
     if args.command == "current":
         rev = asyncio.run(current_revision(url))
         print(rev or "not migrated")
+        return 0
+
+    if args.command == "sync-catalog":
+        print(_sync_catalog())
+        return 0
+
+    if args.command == "deploy":
+        upgrade(url, "head")
+        rev = asyncio.run(current_revision(url))
+        print(f"upgrade -> {rev or 'not migrated'}")
+        print(_sync_catalog())
         return 0
 
     if args.command == "upgrade":

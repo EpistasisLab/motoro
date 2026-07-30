@@ -1,20 +1,27 @@
-# One job: apply core's schema, then exit.
+# One job: prepare core's database, then exit.
 #
 # This is an *init container*, not an application image. Core is a headless
 # library and has no app image to build — see compose.yml. The distinction that
-# matters: a single container runs the migration to completion and gates whatever
-# comes after it, which is the deploy-step shape. Migrating from inside N
-# application replicas is the shape that races, and this is not that.
+# matters: a single container runs to completion and gates whatever comes after
+# it, which is the deploy-step shape. Migrating from inside N application
+# replicas is the shape that races, and this is not that.
 #
-# Installed with --no-deps and an explicit dependency list rather than
-# `pip install .`, because the migration chain needs almost nothing: importing
-# the four model modules plus agentic_core.migrations pulls in no litellm, no
-# instructor, no mcp, and no opentelemetry. Installing the full runtime would
-# multiply this image's size for code that never executes here.
+# Two steps, both idempotent (`deploy` = `upgrade` then `sync-catalog`):
 #
+#   1. Apply the schema.
+#   2. Project the pattern registry into `architectural_patterns`.
+#
+# Step 2 is why this installs core's full dependency set rather than the five
+# packages the schema alone needs. Building the catalog means importing every
+# pattern plugin to read its metadata, and the plugins import the runtime —
+# litellm, instructor, opentelemetry, structlog. There is no way around it: the
+# metadata lives on the plugin classes, which is the whole point of the design.
+#
+# So this image is ~1 GB rather than ~264 MB. If that ever matters more than
+# having one deploy step, split it: `upgrade` genuinely needs nothing but Alembic
+# and a driver, and
 # tests/test_step0_boundary.py::test_migration_chain_stays_installable_without_runtime_deps
-# fails if a model or migration ever reaches for one of those, so the day this
-# list becomes wrong is the day a test says so — not the day a deploy breaks.
+# keeps that true.
 FROM python:3.13-slim
 
 WORKDIR /app
@@ -24,13 +31,7 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir --no-deps . \
- && pip install --no-cache-dir \
-      "alembic>=1.18.4" \
-      "sqlalchemy[asyncio]>=2.0.50" \
-      "asyncpg>=0.30.0" \
-      "pydantic>=2.10.0" \
-      "pydantic-settings>=2.14.1"
+RUN pip install --no-cache-dir .
 
 # Note what is absent: the repo's .env. CoreSettings reads `env_file=".env"`, and
 # that file holds host-side URLs (localhost:5453) which are wrong inside the
@@ -39,4 +40,6 @@ RUN pip install --no-cache-dir --no-deps . \
 # accident.
 
 ENTRYPOINT ["python", "-m", "agentic_core.migrations"]
-CMD ["upgrade"]
+# `deploy`, not `upgrade`: preparing core's database means the schema *and* the
+# catalog projection, which must run after the schema exists.
+CMD ["deploy"]

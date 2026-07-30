@@ -15,7 +15,7 @@ from sqlalchemy import text
 
 from agentic_core.config import settings
 from agentic_core.engine.context import RunContext
-from agentic_core.engine.patterns import composition
+from agentic_core.engine.patterns import catalog, composition
 from agentic_core.engine.patterns.base import HookAction, HookCallable, HookPoint, PatternPlugin
 from agentic_core.engine.patterns.registry import PluginRegistry
 from agentic_core.engine.runtime import AgentRunResult, AgentRuntime
@@ -160,9 +160,7 @@ class PatternOrchestrator:
         # to some downstream phase that reports a symptom instead of a cause.
         # Every other category stays advisory: a knowledge or quality hook that
         # dies should not take a working run down with it.
-        self._load_bearing_slugs: set[str] = {
-            p.slug for p in self._plugins if str(p.category) == "execution"
-        }
+        self._load_bearing_slugs: set[str] = {p.slug for p in self._plugins if str(p.category) == "execution"}
 
         # Build consolidated hook pipeline: HookPoint → ordered list of (slug, callable)
         self._hooks: dict[HookPoint, list[tuple[str, HookCallable]]] = {}
@@ -593,9 +591,7 @@ class PatternOrchestrator:
                     # hook never got to write — a provider 404 in
                     # ``reason_act.pre_act`` used to surface as "Act phase
                     # requires PlanOutput in context" (#1465).
-                    context.metadata.setdefault(
-                        "abort_error", f"Hook '{slug}' at {point.value} failed: {exc}"
-                    )
+                    context.metadata.setdefault("abort_error", f"Hook '{slug}' at {point.value} failed: {exc}")
                     return HookAction.ABORT
                 count = self._consecutive_hook_errors.get(error_key, 0) + 1
                 self._consecutive_hook_errors[error_key] = count
@@ -764,7 +760,16 @@ class PatternOrchestrator:
                 if dep_cls is not None:
                     category_map[dep] = str(dep_cls.category)
         active_set = set(active_slugs)
-        missing_deps = composition.collect_missing_dependencies(active_set, dep_graph)
+        # ``category_map`` is not optional in practice: without it,
+        # collect_missing_dependencies cannot apply its same-category singleton
+        # skip, and a pattern that depends on another in its own singleton
+        # category is reported missing — then rejected, because the slot it would
+        # need is the one its dependent already occupies. ``reason_act ->
+        # single_agent_baseline`` is the case named in that helper's own
+        # docstring. ARES omits it too (orchestrator.py:767); the bug is dormant
+        # there only because no plugin declares ``dependencies``, so the graph is
+        # always empty and this whole block is unreachable.
+        missing_deps = composition.collect_missing_dependencies(active_set, dep_graph, category_map)
         auto_added: list[str] = []
         unresolved: list[tuple[str, str]] = []
         for slug in active_slugs:
@@ -797,7 +802,13 @@ class PatternOrchestrator:
                 log.warning("pattern.orchestrator.unknown_slug", slug=slug)
                 continue
             instance = plugin_cls()
-            params = cfg.pattern_params.get(slug, {})
+            # Fill in the plugin's own ``configuration_schema`` defaults beneath
+            # whatever the caller supplied. ARES reads these from the
+            # architectural_patterns table, so an unseeded row silently fell back
+            # to the ``params.get(key, literal)`` fallbacks inside configure() —
+            # a second copy of every default, free to drift from the schema the
+            # UI renders. Read off the plugin class, the two cannot disagree.
+            params = catalog.merge_schema_defaults(plugin_cls, cfg.pattern_params.get(slug, {}))
             # Issue #1044: validate params at runtime, not just at agent
             # create/update.  A broken DB row (manual edit, stale migration,
             # older write) would otherwise silently configure the plugin

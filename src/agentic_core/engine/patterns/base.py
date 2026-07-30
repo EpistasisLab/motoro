@@ -17,7 +17,7 @@ from typing import Any, ClassVar
 from pydantic import BaseModel
 
 from agentic_core.engine.context import RunContext
-from agentic_core.models.pattern import PatternCategory
+from agentic_core.models.pattern import PatternCategory, PatternPhase
 
 # ---------------------------------------------------------------------------
 # Hook system types
@@ -83,6 +83,47 @@ class PatternPlugin(ABC):
     # -- Class-level identity (set on each concrete subclass) ---------------
     slug: ClassVar[str]
     category: ClassVar[PatternCategory]
+
+    # -- Catalog metadata --------------------------------------------------
+    # The plugin class is the source of truth for what a pattern *is*. ARES
+    # keeps this in an `architectural_patterns` table seeded by a data
+    # migration, which makes code and catalog two sources of truth that drift:
+    # renaming ``solo_agent_loop`` to ``single_agent_baseline`` needed migration
+    # 0009 to chase the change through the dependency arrays in data, and the
+    # ``is_implemented`` column is hand-maintained with nothing reconciling it
+    # against which plugins actually exist.
+    #
+    # Declared here instead, so validation and parameter defaults read them
+    # in-process with no database round trip and nothing to keep in sync. The
+    # table becomes a projection: ``sync_pattern_catalog()`` writes these values
+    # into it for products that need to query the catalog (a UI listing, an
+    # advisor's knowledge base), and never the other way around.
+
+    #: Human-readable name. Empty means "derive from the slug".
+    display_name: ClassVar[str] = ""
+
+    #: What the pattern does, in prose. Surfaced to products, not used at run time.
+    description: ClassVar[str] = ""
+
+    #: Complexity tier. Unrelated to SRPA phases — see ``replaces_phases`` for those.
+    complexity_phase: ClassVar[PatternPhase] = PatternPhase.BASIC
+
+    #: Slugs this pattern needs co-active. Already honoured by
+    #: ``PatternOrchestrator.from_pattern_config``, which auto-activates a missing
+    #: dependency when it can safely fill an empty singleton slot.
+    dependencies: ClassVar[list[str]] = []
+
+    #: Whether the pattern is meaningless without a multi-agent role assignment.
+    requires_multi_agent: ClassVar[bool] = False
+
+    #: JSON Schema for ``pattern_params[slug]``. Every property should carry a
+    #: ``default``: those defaults are merged into the params a plugin receives,
+    #: so ``configure`` gets a fully populated dict and its own
+    #: ``params.get(key, fallback)`` literals become a redundant second copy.
+    configuration_schema: ClassVar[dict[str, Any]] = {}
+
+    #: Pattern version, for products tracking catalog changes.
+    version: ClassVar[str] = "1.0.0"
 
     # Optional: slugs of patterns this pattern conflicts with
     conflicts_with: ClassVar[list[str]] = []

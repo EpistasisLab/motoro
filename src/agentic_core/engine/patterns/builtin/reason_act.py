@@ -32,7 +32,7 @@ from agentic_core.engine.patterns.prompts.reason_act import (
     window_messages,
 )
 from agentic_core.engine.patterns.registry import PluginRegistry
-from agentic_core.models.pattern import PatternCategory
+from agentic_core.models.pattern import PatternCategory, PatternPhase
 from agentic_core.models.run import RunStep, StepPhase
 from agentic_core.schemas.llm import (
     ActOutput,
@@ -76,6 +76,52 @@ class ReasonActPlugin(PatternPlugin):
 
     slug = "reason_act"
     category = PatternCategory.EXECUTION
+
+    display_name: ClassVar[str] = "ReAct"
+    description: ClassVar[str] = (
+        "Alternates between deliberation and execution in a tight loop: the agent formulates an "
+        "explicit Thought, selects and performs an Action, inspects the Observation, and repeats "
+        "until a conclusive answer emerges."
+    )
+    complexity_phase: ClassVar[PatternPhase] = PatternPhase.INTROSPECTIVE
+    # ARES's seed row says `solo_agent_loop` — the pre-rename slug, which
+    # migration 0009 had to chase through the dependency arrays in data. Declared
+    # on the class, a rename cannot leave a stale slug behind in a table.
+    dependencies: ClassVar[list[str]] = ["single_agent_baseline"]
+    configuration_schema: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "max_iterations": {
+                "type": "integer",
+                "default": 15,
+                "minimum": 1,
+                "maximum": 100,
+                "description": "Maximum Thought-Action-Observation cycles.",
+            },
+            "include_scratchpad": {
+                "type": "boolean",
+                "default": True,
+                "description": "Include previous Thought-Action-Observation history in each Reason call.",
+            },
+            "scratchpad_window": {
+                "type": "integer",
+                "default": 10,
+                "minimum": 1,
+                "maximum": 50,
+                "description": "Maximum recent triples to include when include_scratchpad is true.",
+            },
+            "observation_format": {
+                "type": "string",
+                "enum": ["raw", "summarized"],
+                "default": "raw",
+                "description": (
+                    "How tool results are formatted: raw returns output directly, summarized uses LLM to condense."
+                ),
+            },
+        },
+    }
+
     # reason_act and tree_of_thought both replace the Reason phase (M76 #1042).
     # The EXECUTION-category singleton rule already prevents co-activation,
     # but declaring ``conflicts_with`` surfaces a clearer error message and

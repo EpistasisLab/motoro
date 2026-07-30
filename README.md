@@ -18,7 +18,7 @@ The scope decisions and the boundary contract live in ARES under
 **A run executes end to end.** Create an agent, create a run, execute it under
 either of the two migrated execution patterns.
 
-61 files / 11,055 LOC — about 15% of the ARES backend. 35 tests pass against a
+63 files / 11,400 LOC — about 15% of the ARES backend. 57 tests pass against a
 real Postgres, including full Sense→Reason→Plan→Act runs under both patterns.
 
 | Landed | |
@@ -202,19 +202,23 @@ request, and not in the examples, because a feature developer should never have 
 think about core's schema.
 
 `agentic-core-migrate` is that deploy step, not an exception to it: a **one-shot
-init container** that waits for Postgres to be healthy, applies the schema, and
-exits 0. One container, running to completion, gating what follows — there is
-nothing to race. `docker compose up -d` therefore brings the database up
-*migrated*, with no second command to remember. It shows as `Exited (0)` in
-`docker compose ps`, which is success. A product using its own orchestrator
-reproduces the shape with an init container, a Helm hook, or a release task.
+init container** that waits for Postgres to be healthy, runs `deploy`, and exits
+0. One container, running to completion, gating what follows — there is nothing to
+race. `docker compose up -d` therefore brings the database up *ready*, with no
+second command to remember. It shows as `Exited (0)` in `docker compose ps`, which
+is success. A product using its own orchestrator reproduces the shape with an init
+container, a Helm hook, or a release task.
 
-The image (`docker/Dockerfile.migrate`) installs core with `--no-deps` and five
-explicit dependencies, because applying the schema needs none of core's runtime —
-no litellm, no instructor, no mcp, no opentelemetry — which keeps it at ~264 MB
-rather than a gigabyte of unused inference machinery. A boundary test fails if a
-model or migration ever reaches for one of those, so the list going stale is a
-test failure rather than a broken deploy.
+`deploy` is two idempotent steps: `upgrade` applies the schema, then
+`sync-catalog` projects the pattern registry into `architectural_patterns` (see
+below). Either can be run alone.
+
+The image is ~624 MB because of that second step: building the catalog means
+importing every pattern plugin to read its metadata, and the plugins import the
+runtime — litellm, instructor, opentelemetry. Applying the *schema* alone needs
+none of that, and a boundary test keeps it that way, so splitting this back into a
+slim schema-only container remains a one-line change rather than an
+investigation.
 
 **Every revision is re-runnable.** Four properties, each with a test:
 
@@ -279,6 +283,70 @@ connection pooling, and its transaction boundaries without a product noticing,
 and no product can corrupt core's tables by writing them directly.
 
 Verified end to end from an empty database: migrate → provision → run.
+
+### Pattern metadata: the plugin class is the source of truth
+
+`create_agent` validates `pattern_config` and raises `PatternConfigError` on a bad
+slug, bad params, an unsatisfiable dependency, a multi-agent pattern with no role,
+or params naming an inactive pattern. A typo fails at creation rather than after a
+run exists and a model has been billed. Each pattern's `configuration_schema`
+defaults are also merged into `pattern_params` before `configure()` runs, so
+creating an agent with no parameters still gets the documented ones.
+
+**Both read the registry, not the database.** That is the whole design:
+
+```python
+class ReasonActPlugin(PatternPlugin):
+    slug = "reason_act"
+    category = PatternCategory.EXECUTION
+    display_name = "ReAct"
+    description = "Alternates between deliberation and execution..."
+    complexity_phase = PatternPhase.INTROSPECTIVE
+    dependencies = ["single_agent_baseline"]
+    configuration_schema = {...}          # every property carries a `default`
+```
+
+ARES keeps this in the `architectural_patterns` table, seeded by a data migration,
+and that costs it real bugs:
+
+- **Validation depends on a migration having run.** An unseeded table rejects
+  *every* agent with "Unknown pattern slug". Core has a test that creates an agent
+  successfully against a deliberately emptied table.
+- **Code and catalog drift.** Renaming `solo_agent_loop` to
+  `single_agent_baseline` left the dependency arrays pointing at the old slug, and
+  needed migration `0009` to chase it through data. A test now fails if any
+  declared dependency names an unregistered pattern.
+- **Defaults exist twice.** The schema the UI renders and the
+  `params.get(key, literal)` fallback inside `configure()` are two copies free to
+  disagree. A test asserts they match.
+- **`is_implemented` is hand-maintained**, with nothing reconciling it against
+  which plugins exist. Here it is derived: the class is discoverable, so the
+  pattern is implemented.
+
+Two latent bugs surfaced when these attributes were declared, because ARES's
+`from_pattern_config` reads `dependencies` off the plugin class — where nothing
+ever set it, so its dependency auto-resolution was unreachable code. Both are
+fixed in core and both are in ARES: `collect_missing_dependencies` is called
+without `category_map` (`orchestrator.py:767`), and the composition check is passed
+metadata for only the *active* slugs. Either one makes a pattern that depends on
+another in its own singleton category — `reason_act` on `single_agent_baseline` —
+fail with "requires X, which is not active."
+
+**Core never reads the table.** `sync_pattern_catalog()` writes it, one way, as a
+deploy step, for products that need to query the catalog — a patterns page, an
+advisor's knowledge base, an experiment designer choosing factors. Read it back
+with `list_catalog()` so a product needs no session of its own:
+
+```python
+from agentic_core.services.pattern_catalog import list_catalog
+rows = await list_catalog(implemented_only=True)
+```
+
+Rows for patterns that are not registered are reported as `stale` and left alone
+rather than deleted: core ships 2 of 37 patterns, so "not registered in this
+process" does not mean "does not exist". The upsert is `DO UPDATE`, not `DO
+NOTHING` — a description or schema changed in code must correct the row, which is
+what ARES needed migrations `0009`, `0010` and `0025` to do by hand.
 
 ### Setting a provider
 
