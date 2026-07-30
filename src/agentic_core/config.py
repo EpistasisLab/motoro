@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -39,6 +40,26 @@ class CoreSettings(BaseSettings):
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"
+
+    # Provider credentials.
+    #
+    # These carry `validation_alias`, which makes pydantic-settings read the
+    # bare environment name and ignore the product's `env_prefix`. That is
+    # deliberate: `ANTHROPIC_API_KEY` and friends are conventional names that
+    # tooling, CI, and developers already set, and forcing them under a
+    # per-product prefix (`ARES_ANTHROPIC_API_KEY`) buys nothing.
+    #
+    # Read by the built-in resolver in ``services.credentials``. A product that
+    # keeps credentials elsewhere — a per-user table, a secret manager — installs
+    # its own resolver and leaves these empty.
+    anthropic_api_key: str = Field(default="", validation_alias="ANTHROPIC_API_KEY")
+    openai_api_key: str = Field(default="", validation_alias="OPENAI_API_KEY")
+    # Anthropic on Microsoft Foundry. The base URL is derived from the resource
+    # name, so the key alone is not enough — it does not encode an endpoint.
+    anthropic_foundry_api_key: str = Field(default="", validation_alias="ANTHROPIC_FOUNDRY_API_KEY")
+    anthropic_foundry_resource: str = Field(default="", validation_alias="ANTHROPIC_FOUNDRY_RESOURCE")
+    # AWS region for Bedrock; litellm reads the bearer token from api_key.
+    bedrock_region: str = Field(default="", validation_alias="AWS_REGION")
 
     # LLM bridge
     llm_call_timeout_seconds: int = 120
@@ -81,7 +102,11 @@ class CoreSettings(BaseSettings):
     # internet-facing endpoint to enable TLS certificate verification.
     otel_exporter_otlp_insecure: bool = True
 
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    # populate_by_name: the credential fields above carry a validation_alias,
+    # which by default makes pydantic accept *only* the alias. Without this, a
+    # product (or a test) constructing settings explicitly —
+    # `Settings(anthropic_api_key=...)` — would have the value silently ignored.
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore", populate_by_name=True)
 
 
 _instance: CoreSettings | None = None

@@ -138,3 +138,10 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_agents_owner_id'), table_name='agents')
     op.drop_table('agents')
     # ### end Alembic commands ###
+
+    # Hand-added: autogenerate emits CREATE TYPE for a native enum but never the
+    # matching DROP TYPE, so a downgrade leaves the types behind and the next
+    # upgrade fails with `type "pattern_category" already exists`. Dropping the
+    # tables does not cascade to the types — they are schema-level objects.
+    for enum_name in ("step_phase", "run_status", "pattern_phase", "pattern_category"):
+        op.execute(f"DROP TYPE IF EXISTS {enum_name}")

@@ -175,9 +175,50 @@ set -a && . ./.env && set +a
 Then run an agent:
 
 ```bash
-.venv/bin/python examples/run_agent.py --dry-run                 # no key needed
-.venv/bin/python examples/run_agent.py --pattern reason_act      # needs ANTHROPIC_API_KEY
+.venv/bin/python examples/run_agent.py --dry-run                 # no credential needed
+.venv/bin/python examples/run_agent.py --pattern reason_act
 .venv/bin/python examples/run_agent.py --pattern single_agent_baseline
+.venv/bin/python examples/run_agent.py --provider azure_foundry  # Anthropic on Foundry
+```
+
+### Setting a provider
+
+Put the conventional variables in `.env` and a run works with no code:
+
+```bash
+ANTHROPIC_API_KEY=sk-ant-...
+# or, for Anthropic on Microsoft Foundry — BOTH are required:
+ANTHROPIC_FOUNDRY_API_KEY=...
+ANTHROPIC_FOUNDRY_RESOURCE=my-resource
+```
+
+**The `AGENTIC_` prefix does not apply to credentials.** They carry bare-name
+validation aliases, so `ANTHROPIC_API_KEY` is read as-is — these are conventional
+names your tooling already sets, and putting them under a product prefix buys
+nothing.
+
+**Foundry needs the resource as well as the key.** The key does not encode an
+endpoint; the base URL is derived from the resource name
+(`https://<resource>.services.ai.azure.com`, the bare host — litellm's `azure_ai`
+route appends `/anthropic/v1/messages` itself, so a base ending in `/anthropic`
+double-counts the segment). A key with no resource raises at resolution time
+rather than failing later as an opaque 401.
+
+Resolution happens at **call time**, via `services.credentials`, in this order:
+
+1. A credential on the `ModelConfig` (an explicit per-call override).
+2. The installed resolver — `env_credential_resolver` (reads settings) unless replaced.
+3. Nothing, and the call fails loudly rather than borrowing a shared key.
+
+Why not just set `ModelConfig.api_key`? Because it is `exclude=True`, so it does
+**not** survive being persisted with the agent and rebuilt when the run executes —
+a key set at agent-creation time is gone by call time. A test pins this.
+
+A product that keeps credentials elsewhere installs its own resolver:
+
+```python
+from agentic_core.services.credentials import set_credential_resolver
+set_credential_resolver(my_resolver)   # ARES reads an encrypted per-user table
 ```
 
 ### Core's backing services are a requirement

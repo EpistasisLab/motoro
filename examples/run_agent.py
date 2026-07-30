@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 
 from pydantic_settings import SettingsConfigDict
@@ -84,31 +83,26 @@ async def main() -> int:
         print(f"!! {args.pattern} is not registered", file=sys.stderr)
         return 1
 
-    # The credential rides on the ModelConfig, so no resolver hook is needed and
-    # core never has to know where secrets live. This is the whole of "setting an
-    # LLM provider" — no users, no settings table, no encryption.
-    if args.provider == "azure_foundry":
-        api_key = os.environ.get("ANTHROPIC_FOUNDRY_API_KEY", "")
-        resource = os.environ.get("ANTHROPIC_FOUNDRY_RESOURCE", "")
-        api_base = resource if resource.startswith("http") else f"https://{resource}.services.ai.azure.com"
-        provider, key_var = LLMProvider.AZURE_FOUNDRY, "ANTHROPIC_FOUNDRY_API_KEY"
-    else:
-        api_key = os.environ.get("ANTHROPIC_API_KEY", "")
-        api_base = None
-        provider, key_var = LLMProvider.ANTHROPIC, "ANTHROPIC_API_KEY"
+    # Setting a provider is just picking one — core's built-in resolver reads the
+    # credential from settings (i.e. .env) at call time. Deliberately NOT put on
+    # the ModelConfig: api_key is `exclude=True`, so it would not survive being
+    # persisted with the agent and rebuilt when the run executes.
+    provider = LLMProvider.AZURE_FOUNDRY if args.provider == "azure_foundry" else LLMProvider.ANTHROPIC
+    model_config = ModelConfig(provider=provider, model=args.model, max_tokens=2048)
 
-    if not api_key and not args.dry_run:
-        print(f"!! {key_var} is not set (use --dry-run to skip the LLM call)", file=sys.stderr)
+    from agentic_core.services.credentials import env_credential_resolver
+
+    resolved = await env_credential_resolver(model_config)
+    if resolved is None and not args.dry_run:
+        want = (
+            "ANTHROPIC_FOUNDRY_API_KEY + ANTHROPIC_FOUNDRY_RESOURCE"
+            if args.provider == "azure_foundry"
+            else "ANTHROPIC_API_KEY"
+        )
+        print(f"!! no credential resolved for {provider.value}: set {want} (or use --dry-run)", file=sys.stderr)
         return 1
-
-    model_config = ModelConfig(
-        provider=provider,
-        model=args.model,
-        api_key=api_key or None,
-        api_base=api_base,
-        max_tokens=2048,
-    )
-    print(f"provider:      {provider.value}  model={args.model}")
+    where = resolved["api_base"] if resolved else "n/a"
+    print(f"provider:      {provider.value}  model={args.model}  endpoint={where}")
 
     from agentic_core.models.database import system_session
 
