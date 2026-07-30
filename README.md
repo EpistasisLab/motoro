@@ -19,7 +19,7 @@ Slice 1 — the SRPA loop — in progress. **Step 0 of 6 landed.**
 
 | Step | Contents | LOC | State |
 |---|---|---|---|
-| 0 | `config`, `models.base`, `observability.*`, `schemas.{llm,pattern,user}`, `security.prompt_injection`, `services.{credential_scrubber,llm_errors,model_capabilities,retry}` | 2,171 | ✅ |
+| 0 | `config`, `models.base`, `observability.*`, `schemas.{llm,pattern}`, `security.prompt_injection`, `services.{credential_scrubber,llm_errors,model_capabilities,retry}` | 1,914 | ✅ |
 | 1 | `mcp.client`, `models.{agent,database,pricing,redis,run}`, `schemas.{agent,pricing}` | 1,390 | — |
 | 2 | `engine.context`, `mcp.registry`, `services.pricing_service` | 783 | — |
 | 3 | `engine.phase`, `mcp.adapters` | 612 | — |
@@ -29,6 +29,34 @@ Slice 1 — the SRPA loop — in progress. **Step 0 of 6 landed.**
 Slice 1 totals **31 modules / 7,963 LOC** — 11% of the ARES backend. It has no
 dependency cycles, so the steps above are a strict order rather than a
 suggestion.
+
+### Core does not manage users
+
+Core owns agents, runs, steps, tools, memory, and patterns — the Agent Runtime
+and Service Layer of the ARES architecture diagram. It has **no** user model, no
+authentication, no tokens, and no ownership columns. That matches the data model
+documented in ARES `docs/ARCHITECTURE.md`, whose core entities carry
+`created_at`/`updated_at` and no owner at all; the ownership columns arrived
+later, with per-user isolation.
+
+Consequences, each of which is a decision rather than an omission:
+
+- **No `OwnedMixin`.** The ARES original adds `created_by_id` / `updated_by_id`
+  as `ForeignKey("users.id")`. Since `users` would be a *product* table, that is
+  a core→product foreign key, which the boundary forbids.
+- **No `UserSummary`.** It is an attribution DTO for API responses, and core has
+  no API to respond with.
+- **`agents.created_by_id` and `agent_runs.started_by_id` do not come across.**
+  Both are `NOT NULL` in ARES, so importing them would mean core could not store
+  an agent or a run without a user.
+
+A product that wants ownership adds it on its own side. The recommended shape is
+an opaque, nullable, un-constrained `owner_id` on the core model, with the
+product's migration supplying the foreign key, the `NOT NULL`, and any per-owner
+unique constraint. The column is declared in core rather than added purely by a
+product migration for a mechanical reason: core's Alembic autogenerate diffs
+against `Base.metadata`, so a column in the database but absent from core's model
+is one core proposes to **drop**.
 
 ### Deliberately excluded from slice 1
 
@@ -101,6 +129,15 @@ python scripts/pull_from_ares.py --step 1          # pull a dependency-ordered s
 python scripts/pull_from_ares.py models.agent      # or named modules
 python scripts/pull_from_ares.py --verify          # check what is on disk
 ```
+
+`REQUIRED_EDITS` in that script lists every module that must **not** be copied
+verbatim, with what has to change — the ownership columns on `models.agent` and
+`models.run`, `scoped_session` on `models.database`, the credential resolver in
+`services.llm_service`. Pulling one prints the note. That list exists because
+`models/base.py` was pulled mechanically and brought `OwnedMixin` — two
+`ForeignKey("users.id")` columns — into a core that does not manage users. A
+rewritten import is visible in a diff; a schema dependency smuggled in by a mixin
+is not.
 
 `--verify` asserts two invariants over everything already pulled, and should pass
 before the next step starts:

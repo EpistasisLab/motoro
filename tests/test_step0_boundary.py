@@ -27,7 +27,6 @@ STEP_0 = [
     "observability.tracing",
     "schemas.llm",
     "schemas.pattern",
-    "schemas.user",
     "security.prompt_injection",
     "services.credential_scrubber",
     "services.llm_errors",
@@ -40,10 +39,10 @@ STEP_0 = [
 def test_module_imports(mod: str) -> None:
     """Every migrated module imports standalone.
 
-    An AST scan of third-party imports is not enough on its own: ``schemas.user``
-    passed the scan but failed here, because ``EmailStr`` pulls in
-    ``email-validator`` at class-construction time rather than via an import
-    statement. Only actually importing the module finds that.
+    An AST scan of third-party imports is not enough on its own: the ARES
+    ``schemas/user.py`` passed such a scan but failed here, because ``EmailStr``
+    pulls in ``email-validator`` at class-construction time rather than via an
+    import statement. Only actually importing the module finds that.
     """
     importlib.import_module(f"agentic_core.{mod}")
 

@@ -74,13 +74,14 @@ class LLMServerError(LLMError):
 
 
 class LLMProviderNotConfiguredError(LLMError):
-    """No LLM provider is configured for the acting user.
+    """No LLM provider could be resolved for the call.
 
-    Raised by ``resolve_model_config_for_user`` when the user has no active
-    default :class:`UserLLMSetting` and no explicit provider was supplied
-    (M112). ARES no longer falls back to server-wide environment credentials,
-    so the user must add a provider + API key in Settings before any LLM work
-    can run. Callers at the API boundary map this to **HTTP 400** (#1443).
+    Raised when the registered credential resolver yields no usable provider and
+    the :class:`ModelConfig` carried no credential of its own. Core does not
+    decide *where* credentials live — a product installs a resolver, and whether
+    that reads a per-user record, an environment variable, or a secret manager is
+    the product's policy. A product serving HTTP typically maps this to 400,
+    since it means the caller has not finished configuring a provider.
     """
 
     def __init__(

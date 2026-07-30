@@ -24,7 +24,6 @@ import argparse
 import ast
 import os
 import re
-import shutil
 import sys
 from pathlib import Path
 
@@ -42,7 +41,6 @@ SLICES: dict[str, list[str]] = {
         "observability.tracing",
         "schemas.llm",
         "schemas.pattern",
-        "schemas.user",
         "security.prompt_injection",
         "services.credential_scrubber",
         "services.llm_errors",
@@ -63,6 +61,43 @@ SLICES: dict[str, list[str]] = {
     "3": ["engine.phase", "mcp.adapters"],
     "4": ["engine.runtime", "engine.sense", "services.llm_service"],
     "5": ["engine.act", "engine.plan", "engine.reason"],
+}
+
+# Modules that must NOT be copied verbatim, and what has to change.
+#
+# This exists because ``models/base.py`` was pulled mechanically and brought
+# ``OwnedMixin`` — two ``ForeignKey("users.id")`` columns — into a core that does
+# not manage users. A rewritten import is visible; a schema dependency smuggled
+# in by a mixin is not. Anything listed here prints a warning on pull and is a
+# deliberate decision rather than a mechanical one.
+REQUIRED_EDITS: dict[str, str] = {
+    "models.base": "DONE: OwnedMixin dropped — no ForeignKey('users.id') in core.",
+    "models.agent": (
+        "strip ownership: created_by_id (NOT NULL FK users.id, line ~51), the "
+        "created_by relationship (~115), the User TYPE_CHECKING import (~19), and "
+        "the uq_agents_owner_name_active constraint (~33). Replace with a nullable, "
+        "un-constrained owner_id if attribution is wanted."
+    ),
+    "models.run": (
+        "strip ownership: started_by_id (NOT NULL FK users.id, ~101), the "
+        "started_by relationship (~110), the User TYPE_CHECKING import (~18)."
+    ),
+    "models.pricing": "strip created_by_id FK (~23) and relationship('User') (~27).",
+    "schemas.agent": "drop the UserSummary import (~11) and the created_by field (~170).",
+    "schemas.pricing": "drop the UserSummary import (~9) and the created_by field (~48).",
+    "models.database": (
+        "drop scoped_session(viewer) (~123) and the Viewer import (~45) — that is "
+        "the only isolation dependency here. Keep get_engine, get_db, system_session."
+    ),
+    "services.llm_service": (
+        "replace _resolve_connection_for_user (~222-300) with a registered "
+        "credential-resolver hook; core's default reads ModelConfig only."
+    ),
+    "services.pricing_service": "leave list_known_models (~158) behind — it is the only Viewer-dependent function.",
+    "engine.runtime": (
+        "make the check_resource_limits import (~140) a registered hook; it is "
+        "already wrapped in a try that returns None, so a no-op default is faithful."
+    ),
 }
 
 IMPORT_RE = re.compile(r"\bares\.")
@@ -250,7 +285,18 @@ def main() -> int:
             print(f"  !! {mod}: depends on modules not yet pulled: {', '.join(missing)}")
             problems += 1
 
+    pending = [(m, note) for m, _, _ in copied if (note := REQUIRED_EDITS.get(m)) and not note.startswith("DONE")]
+    if pending:
+        print("\n  HAND-EDITS REQUIRED — these were copied verbatim and must not stay that way:")
+        for mod, note in pending:
+            print(f"    {mod}:")
+            for line in re.findall(r".{1,86}(?:\s|$)", note):
+                if line.strip():
+                    print(f"        {line.strip()}")
+
     print(f"\n{'CHECK' if args.check else 'PULLED'}: {len(copied)} modules, {problems} problem(s)")
+    if pending:
+        print(f"         {len(pending)} module(s) awaiting hand-edits (see above)")
     return 1 if problems else 0
 
 
