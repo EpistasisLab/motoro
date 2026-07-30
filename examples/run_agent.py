@@ -8,15 +8,16 @@ points is the cheapest thing that fails loudly when core secretly needs a produc
 
 Usage::
 
-    export AGENTIC_DATABASE_URL='postgresql+asyncpg://user:pw@localhost:5432/agentic_core_dev'
+    cp .env.example .env && docker compose up -d
+    set -a && . ./.env && set +a
     export ANTHROPIC_API_KEY='sk-ant-...'
     python examples/run_agent.py --pattern reason_act
 
     # or, without spending anything:
     python examples/run_agent.py --dry-run
 
-No Redis is needed (the runtime degrades to no working memory), no MCP server is
-needed (an agent with no tools needs none), and no pgvector is needed.
+Requires `docker compose up -d` (Postgres, and Redis for working memory). No MCP
+server is needed — an agent with no tools needs none.
 """
 
 from __future__ import annotations
@@ -56,18 +57,23 @@ async def main() -> int:
     ap.add_argument("--model", default="claude-sonnet-4-6")
     ap.add_argument("--goal", default="Answer the user's question accurately and concisely.")
     ap.add_argument("--input", default="What is 17 * 23? Show your reasoning briefly.")
-    ap.add_argument("--reset", action="store_true", help="drop and recreate the schema first")
+    ap.add_argument("--reset", action="store_true", help="roll the schema back to base and re-migrate first")
     ap.add_argument("--dry-run", action="store_true", help="set everything up but do not call the LLM")
     args = ap.parse_args()
 
     # 1. Install settings before anything reads them.
     configure(Settings())
 
-    # 2. Create the schema. No Alembic yet — see runner.init_schema.
-    from agentic_core.runner import create_agent, create_run, execute_run, init_schema
+    # 2. Apply core's schema the way a product would: run core's migration chain.
+    #    (runner.init_schema / create_all also works, but is for tests — it leaves
+    #    the schema unversioned.)
+    from agentic_core.migrations import current_revision, downgrade, upgrade_async
+    from agentic_core.runner import create_agent, create_run, execute_run
 
-    await init_schema(drop_first=args.reset)
-    print("schema ready")
+    if args.reset and await current_revision() is not None:
+        await asyncio.to_thread(downgrade, None, "base")
+    await upgrade_async()
+    print(f"schema at revision {await current_revision()}")
 
     # 3. Confirm the pattern registry sees exactly what we migrated.
     from agentic_core.engine.patterns.registry import PluginRegistry
