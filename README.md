@@ -172,14 +172,39 @@ set -a && . ./.env && set +a
 .venv/bin/lint-imports                  # core must never import a product
 ```
 
-Then run an agent:
+### How a product uses core — three phases
+
+`examples/` is laid out as the three phases a product genuinely has. The split
+matters: only the third belongs on a request path.
 
 ```bash
-.venv/bin/python examples/run_agent.py --dry-run                 # no credential needed
-.venv/bin/python examples/run_agent.py --pattern reason_act
-.venv/bin/python examples/run_agent.py --pattern single_agent_baseline
-.venv/bin/python examples/run_agent.py --provider azure_foundry  # Anthropic on Foundry
+# ── 1. DEPLOY STEP — once per release, before the app starts ────────────────
+python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"
+
+# ── 2. PROVISIONING — once; agents are durable resources ───────────────────
+python examples/provision.py            # prints the agent id; idempotent by name
+
+# ── 3. RUNTIME — per request ───────────────────────────────────────────────
+python examples/run.py --agent-id <id> --input "What is 17 * 23?"
 ```
+
+`examples/settings.py` holds the one thing all three share: a `CoreSettings`
+subclass with the product's env prefix.
+
+**Migrations are a deploy step, not app startup.** Running them per process means
+every replica races the same migration, an API and a worker both try to migrate,
+and for a window old and new code run against a half-migrated schema — and a
+migration failure becomes a crash-looping app instead of a failed deploy you can
+read. So core ships a CLI and *does not* migrate for you. An application should
+**verify** the schema and refuse to start if it is behind; both example scripts do
+that with `migrations.current_revision()`.
+
+**`create_run` and `execute_run` are separate calls** so a product can enqueue
+execution rather than block on it: create the run in the request, return the id,
+let a worker execute it. `examples/run.py` does both inline because it is a CLI —
+that is the one thing a real product would change.
+
+Verified end to end from an empty database: refuse → migrate → provision → run.
 
 ### Setting a provider
 
