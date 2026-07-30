@@ -31,8 +31,14 @@ ARES = Path(os.environ.get("ARES_SRC", Path.home() / "dev/ARES/backend/src/ares"
 DEST = Path(__file__).resolve().parent.parent / "src/agentic_core"
 
 # Dependency-ordered slices. Step N may only depend on steps < N.
-# Computed from the runtime import graph of the SRPA loop with isolation,
-# per-user credential resolution, and agent-relationship limits excluded.
+#
+# Computed from the runtime import graph (TYPE_CHECKING edges excluded — they do
+# not constrain order) for the target "create an agent, start a run, execute it
+# under single_agent_baseline or reason_act". Isolation, per-user credential
+# resolution, agent-relationship limits, users, and datasets are excluded; the
+# other 35 pattern plugins are deferred.
+#
+# 43 modules / 10,549 LOC total. No cycles, so this is a strict order.
 SLICES: dict[str, list[str]] = {
     "0": [
         "config",
@@ -48,19 +54,36 @@ SLICES: dict[str, list[str]] = {
         "services.retry",
     ],
     "1": [
+        "worker.resilience",
+        "memory.working",
+        "schemas.patterns.reason_act",
+        "schemas.pricing",
+        "engine.patterns.builtin",
+    ],
+    "2": [
+        "engine.patterns.prompts.reason_act",
+        "engine.patterns.registry",
         "mcp.client",
         "models.agent",
         "models.database",
+        "models.pattern",
         "models.pricing",
         "models.redis",
         "models.run",
         "schemas.agent",
-        "schemas.pricing",
     ],
-    "2": ["engine.context", "mcp.registry", "services.pricing_service"],
-    "3": ["engine.phase", "mcp.adapters"],
-    "4": ["engine.runtime", "engine.sense", "services.llm_service"],
-    "5": ["engine.act", "engine.plan", "engine.reason"],
+    "3": ["engine.context", "mcp.registry", "services.pricing_service"],
+    "4": ["engine.patterns.base", "engine.phase", "mcp.adapters"],
+    "5": [
+        "engine.patterns",
+        "engine.patterns.builtin.single_agent_baseline",
+        "engine.patterns.composition",
+        "engine.runtime",
+        "engine.sense",
+        "services.llm_service",
+    ],
+    "6": ["engine.act", "engine.patterns.orchestrator", "engine.plan", "engine.reason"],
+    "7": ["engine.patterns.builtin.reason_act"],
 }
 
 # Modules that must NOT be copied verbatim, and what has to change.

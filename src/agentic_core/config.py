@@ -54,6 +54,15 @@ class CoreSettings(BaseSettings):
     # so the ids/keys near the start survive. 0 disables truncation.
     act_prior_result_max_chars: int = 4000
 
+    # Pattern engine. Read by the orchestrator's hook pipeline, so these arrived
+    # with the pattern engine rather than with the bare SRPA loop.
+    hook_timeout_seconds: int = 30
+    # When True, a pattern hook returning a wrong-typed value (a BaseModel that
+    # is not the expected phase output, or any non-None / non-HookAction object)
+    # aborts the run instead of being logged and dropped. False preserves the
+    # best-effort behaviour; flip it on in strict environments.
+    fail_on_hook_type_mismatch: bool = False
+
     # MCP subprocess environment isolation. Comma-separated extra env var names
     # allowed through to MCP subprocesses; the built-in allowlist (PATH, HOME,
     # SHELL, TERM, USER, LOGNAME, LANG, LC_ALL) is always included.
