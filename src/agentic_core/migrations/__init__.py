@@ -64,6 +64,7 @@ CORE_TABLES = frozenset(
         "architectural_patterns",
         "llm_pricing_overrides",
         "memory_entries",
+        "mcp_server_configs",
     }
 )
 

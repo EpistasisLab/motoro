@@ -178,6 +178,7 @@ async def test_chain_owns_only_core_tables() -> None:
         "architectural_patterns",
         "llm_pricing_overrides",
         "memory_entries",
+        "mcp_server_configs",
     }
 
 

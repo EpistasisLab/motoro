@@ -18,9 +18,10 @@ The scope decisions and the boundary contract live in ARES under
 **A run executes end to end.** Create an agent, create a run, execute it under
 either of the two migrated execution patterns.
 
-69 files / 12,600 LOC — about 17% of the ARES backend. 74 tests pass against a
-real Postgres, including full Sense→Reason→Plan→Act runs under both patterns and
-a second run that recalls what the first one stored.
+72 files / 13,400 LOC — about 18% of the ARES backend. 98 tests pass against a
+real Postgres, including full Sense→Reason→Plan→Act runs under both patterns, a
+second run that recalls what the first one stored, and a live MCP server
+registered in one process and reconnected in a second, unrelated one.
 
 | Landed | |
 |---|---|
@@ -29,8 +30,8 @@ a second run that recalls what the first one stored.
 | Patterns | `single_agent_baseline`, `reason_act` — **2 of 37**, added one at a time |
 | LLM bridge | `llm_service` + a pluggable credential resolver |
 | Memory | episodic + semantic (`memory_service`, pgvector-backed), working memory |
-| MCP | `client`, `registry`, `adapters` |
-| Persistence | 6 tables, own Alembic chain, own database, own sessions |
+| MCP | `client`, `registry`, `adapters` (transport) + `mcp_service` (persisted registration) |
+| Persistence | 7 tables, own Alembic chain, own database, own sessions |
 | Composition root | `agentic_core.runner` — writes (`create_agent`, `create_run`, `execute_run`) and reads (`get_agent`, `get_run`, `get_runs`, `list_runs`, `get_run_steps`, …) |
 | Observability | tracing + metrics, with a configurable instrument prefix |
 
@@ -90,12 +91,12 @@ src/agentic_core/
   config.py           CoreSettings + configure() + the settings proxy
   models/             SQLAlchemy models; models/base.py owns the shared Base
   schemas/            Pydantic contracts
-  services/           LLM bridge, cost, retry, scrubbing, memory service
-  mcp/                MCP client, registry, tool adapters
+  services/           LLM bridge, cost, retry, scrubbing, memory service, MCP registration, encryption
+  mcp/                MCP client, registry, tool adapters (transport only)
   memory/             working (Redis), episodic + semantic (pgvector), embedding
   engine/             the SRPA loop, and later the pattern engine
   observability/      tracing + metrics
-  security/           prompt-injection fencing (isolation is undecided)
+  security/           prompt-injection fencing (isolation is undecided), MCP command allowlist, SSRF guard
 scripts/
   pull_from_ares.py   the migration tool — see below
 tests/
@@ -425,6 +426,84 @@ context — so memory was written on every run and recalled on none of them.
 Fixed here; `test_a_second_run_actually_recalls_the_first_runs_memory` is the
 regression test, and it was verified to fail against the reverted bug before
 being kept. **This bug is also present in ARES today.**
+
+### MCP: the client was already done; this adds persistence
+
+`agentic_core.mcp` (`client`, `registry`, `adapters`) is transport — connect,
+discover tools, call a tool — and was already a byte-for-byte port of ARES's,
+wired into the Act phase from the start. What was missing is the other half:
+remembering *which* servers a product uses, so a fresh process — a worker, a
+restarted API, a new script invocation — doesn't have to re-register them by
+hand. That's `services.mcp_service` + `models.mcp_server.MCPServerConfig`.
+
+```python
+from agentic_core.services.mcp_service import register_server, hydrate_registry
+
+# Once: connect and persist.
+config = await register_server(name="search", transport="stdio", command="npx -y some-search-server")
+
+# Every subsequent process: reconnect from the table, not from code.
+await hydrate_registry()
+```
+
+**The database is authoritative here — the opposite direction from
+`engine.patterns.catalog`.** There, plugin code was the source of truth and the
+table was a read-only projection for products to query. Here, the in-memory
+`MCPServerRegistry` is the derived, disposable thing: it starts empty every
+process and gets rebuilt from `mcp_server_configs`, never the other way around.
+`hydrate_registry()` is the function that makes persisting a server worth doing
+at all — without it, a registered config would just sit in the table, never
+read back into a live connection.
+
+**`owner_id`, same severance as `Agent`/`AgentRun`/`MemoryEntry`** —
+`created_by_id: NOT NULL FK -> users` becomes opaque, nullable, no foreign key.
+One thing is dropped outright rather than made opaque: ARES's `source_plan_id`
+(`FK -> plan_records`) records that a server was proposed by the Plan Builder —
+a fact about a product feature, not about the server, and an opaque UUID would
+still encode a product concept core has no business referencing at all.
+
+Two self-contained security modules came across unchanged, because they have
+zero coupling to anything ARES- or user-specific: `security.mcp_command_allowlist`
+(a stdio command's executable must be one of `python`/`node`/`npx`/…, and no
+shell metacharacters) and `security.ssrf_guard` (an http/sse URL must not
+resolve to a private/reserved IP, guarding against DNS rebinding too). ARES
+enforces the URL check at its API schema layer; core has no schema layer for
+this, so `register_server`/`update_server` call it directly — the one place
+every registration passes through regardless of caller.
+
+`services.encryption` (Fernet, for a registered server's auth headers) is
+**not** a per-user secret like the embedding-credential lookup it sits next to
+in spirit — one server-side key (`CoreSettings.encryption_key`), the same for
+every row core encrypts. That's what makes it portable with no adaptation.
+
+#### A real bug, found by finally testing this against a live server
+
+No existing test had ever connected `MCPClient` to an actual MCP server before
+this slice's tests did. Two defects surfaced immediately, both now fixed and
+regression-tested:
+
+- **`mcp>=1.27.1` (an unbounded floor) resolves to `mcp==2.0.0` on a fresh
+  install, and 2.0.0 hangs `MCPClient.connect()` forever.** That method always
+  installs a `message_handler` on `ClientSession` (to catch
+  `notifications/tools/list_changed`), and 2.0.0 changed the background
+  message-reading task's lifecycle so the process never exits. Verified
+  directly: an identical connect-then-list-tools call returns immediately under
+  `1.27.1` (what ARES actually locks in its lockfile) and hangs indefinitely
+  under `2.0.0`. `pyproject.toml` now caps `mcp>=1.27.1,<2.0.0`.
+- **`MCPServerRegistry.disconnect_all()`'s `asyncio.gather()` broke anyio's
+  cancel-scope contract.** Each stdio client's transport is an anyio task group,
+  and anyio requires cancel scopes to be exited in exact LIFO order, by the same
+  task that entered them. `gather()` violated both: it schedules each
+  `disconnect()` as its own task, and gave no ordering guarantee at all. Fixed
+  to disconnect sequentially, in reverse registration order — verified directly
+  against a live pair of stdio servers, where the old forward/concurrent version
+  reliably raises `RuntimeError: Attempted to exit cancel scope in a different
+  task than it was entered in` and the new version does not. The cost is real:
+  shutdown time is now the sum of each disconnect, not the max.
+
+Both were invisible until a live server was actually exercised — worth knowing
+if you're deciding whether to trust an unbounded dependency range or a
+concurrency optimization you haven't load-tested.
 
 ### Setting a provider
 

@@ -36,8 +36,22 @@ dependencies = [
     "litellm>=1.85.0",
     "instructor>=1.15.1",
     "tenacity>=9.0.0",
-    "mcp>=1.27.1",
+    # Capped, unlike litellm's floor-only range above: mcp 2.0.0 renames
+    # FastMCP -> MCPServer (a real break) and, more seriously, changes
+    # ClientSession's background message-reading task lifecycle so that
+    # MCPClient.connect() — which always installs a message_handler, for
+    # notifications/tools/list_changed — hangs forever on process exit
+    # instead of completing. Verified directly: identical connect/list_tools
+    # call succeeds and returns under 1.27.1 (the version ARES actually locks)
+    # and hangs indefinitely under 2.0.0. No existing test caught this because
+    # none exercised a live server before the MCP persistence layer's tests did.
+    "mcp>=1.27.1,<2.0.0",
     "httpx>=0.28.1",
+    # Fernet, for encrypting registered MCP servers' auth headers at rest
+    # (services.encryption). Already installed transitively today; declared
+    # directly because core imports it by name, not by accident of what else
+    # happens to depend on it.
+    "cryptography>=43.0.0",
     "jsonschema>=4.26.0",
     "structlog>=24.4.0",
     "opentelemetry-api>=1.42.0",

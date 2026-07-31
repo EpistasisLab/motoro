@@ -78,6 +78,7 @@ async def init_schema(*, drop_first: bool = False) -> None:
     from sqlalchemy import text
 
     import agentic_core.models.agent  # noqa: F401  PLC0415
+    import agentic_core.models.mcp_server  # noqa: F401  PLC0415
     import agentic_core.models.memory  # noqa: F401  PLC0415
     import agentic_core.models.pattern  # noqa: F401  PLC0415
     import agentic_core.models.pricing  # noqa: F401  PLC0415

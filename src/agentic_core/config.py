@@ -88,6 +88,17 @@ class CoreSettings(BaseSettings):
     # allowed through to MCP subprocesses; the built-in allowlist (PATH, HOME,
     # SHELL, TERM, USER, LOGNAME, LANG, LC_ALL) is always included.
     mcp_allowed_env_vars: str = ""
+    # Skip the SSRF private-IP/DNS-rebinding check on registered HTTP/SSE server
+    # URLs. Only for trusted dev/research deployments that register servers on
+    # the host machine or local network — see security.ssrf_guard.
+    mcp_allow_private_urls: bool = False
+
+    # Fernet key (or comma-separated keys, for rotation — see
+    # services.encryption) encrypting MCP server auth headers at rest. Not a
+    # per-user secret: one server-side key for every row core encrypts. Generate
+    # with: python -c 'from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())'
+    encryption_key: str = ""
 
     # Memory. A ``sentence-transformers/`` prefix selects the local backend (no
     # API key, runs in-process); anything else is a litellm-supported remote

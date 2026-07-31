@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 # Importing for the metadata side effect — a model not imported here is a table
 # this chain cannot see.
 import agentic_core.models.agent  # noqa: F401
+import agentic_core.models.mcp_server  # noqa: F401
 import agentic_core.models.memory  # noqa: F401
 import agentic_core.models.pattern  # noqa: F401
 import agentic_core.models.pricing  # noqa: F401

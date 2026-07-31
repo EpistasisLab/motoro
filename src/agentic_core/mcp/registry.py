@@ -218,30 +218,42 @@ class MCPServerRegistry:
         return results
 
     async def disconnect_all(self) -> None:
-        """Disconnect all servers concurrently (Issue #775).
+        """Disconnect all servers, sequentially, in reverse registration order.
 
-        Runs ``client.disconnect`` for every connected server in parallel via
-        ``asyncio.gather`` so total shutdown time is bounded by the slowest
-        disconnect rather than the sum. Exceptions from individual disconnects
-        are collected and logged but never re-raised so shutdown always
-        proceeds.
+        Sequential and reverse-ordered because it must be: each stdio client's
+        transport is an anyio task group entered when the client connected, and
+        anyio requires cancel scopes to be exited in exact LIFO order, by the
+        same task that entered them. This used to run every disconnect
+        concurrently via ``asyncio.gather`` — measured to actually break both
+        constraints at once. ``gather`` schedules each coroutine as its own
+        task, so a client's scope gets exited by a different task than opened
+        it (``RuntimeError: Attempted to exit cancel scope in a different task
+        than it was entered in``); and even serialized in registration order,
+        the *first*-registered (outermost, bottom-of-stack) scope was being
+        closed before the *last*-registered (innermost, top-of-stack) one,
+        which anyio also rejects. Reversing the order and dropping the
+        concurrency fixes both — verified directly against a live stdio server
+        pair, where the forward/concurrent version reliably fails and the
+        reverse/sequential version does not. The cost is real: shutdown time is
+        now the sum of each disconnect rather than the max, not bounded by the
+        slowest.
+
+        Exceptions from an individual disconnect are logged but never re-raised
+        so shutdown always proceeds through the rest of the list.
         """
         targets: list[tuple[str, MCPClient]] = [
             (entry.name, entry.client) for entry in self._servers.values() if entry.client.connected
         ]
-        if targets:
-            results = await asyncio.gather(
-                *(client.disconnect() for _, client in targets),
-                return_exceptions=True,
-            )
-            for (name, _client), result in zip(targets, results, strict=True):
-                if isinstance(result, BaseException):
-                    log.warning(
-                        "mcp.server.disconnect_error",
-                        server=name,
-                        error=f"{type(result).__name__}: {result}",
-                        component="mcp_registry",
-                    )
+        for name, client in reversed(targets):
+            try:
+                await client.disconnect()
+            except Exception as exc:
+                log.warning(
+                    "mcp.server.disconnect_error",
+                    server=name,
+                    error=f"{type(exc).__name__}: {exc}",
+                    component="mcp_registry",
+                )
         self._servers.clear()
 
 
