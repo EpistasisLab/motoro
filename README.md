@@ -190,10 +190,20 @@ python examples/provision.py            # prints the agent id; idempotent by nam
 
 # ── 3. RUNTIME — per request ───────────────────────────────────────────────
 python examples/run.py --agent-id <id> --input "What is 17 * 23?"
+
+# ── 3b. RUNTIME, with episodic memory ───────────────────────────────────────
+python examples/memory_run.py --input "My favourite programming language is Rust."
+python examples/memory_run.py --input "What did I say my favourite language was?"
 ```
 
 `examples/settings.py` holds the one thing all three share: a `CoreSettings`
 subclass with the product's env prefix.
+
+`memory_run.py` is still phase 3 — it provisions its own agent the same way
+`provision.py` does, with `memory_config={"episodic_memory_enabled": True}` as
+the only difference — and demonstrates that memory persists in Postgres across
+process invocations, not just across turns in one process: run it twice and the
+second call recalls what the first one stored.
 
 **Migrations are a deploy step, not app startup.** Running them per process means
 every replica races the same migration, an API and a worker both try to migrate,
