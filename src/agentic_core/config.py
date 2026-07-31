@@ -89,6 +89,20 @@ class CoreSettings(BaseSettings):
     # SHELL, TERM, USER, LOGNAME, LANG, LC_ALL) is always included.
     mcp_allowed_env_vars: str = ""
 
+    # Memory. A ``sentence-transformers/`` prefix selects the local backend (no
+    # API key, runs in-process); anything else is a litellm-supported remote
+    # model. ``embedding_dimensions`` must match the model's actual output width —
+    # it sizes the ``memory_entries.embedding`` column at migration time, not the
+    # other way around.
+    embedding_model: str = "sentence-transformers/BAAI/bge-base-en-v1.5"
+    embedding_dimensions: int = 768
+    # Chunk size for remote batch-embedding calls, to stay under provider limits.
+    embedding_batch_max: int = 2048
+    # Stamped onto every row alongside embedding_model, so a deliberate re-embed
+    # (prompt template change, normalization fix) can be told apart from
+    # "same model, same version" rows during search filtering.
+    embedding_version: str = "v1"
+
     # OpenTelemetry. The service name defaults to the library, not a product —
     # a product that does not override this will at least not claim to be ARES.
     otel_service_name: str = "agentic-core"

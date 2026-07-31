@@ -451,11 +451,9 @@ class AgentRuntime:
                     exc_info=True,
                 )
                 summary = f"Run {status.value}. Goal: {user_input[:200]}. Output: {final_output[:500]}"
-            if context.owner_id is None:
-                # Memory is owned data (M113 #1471); with no acting user there is
-                # nobody to own the entry, so drop it rather than guess.
-                logger.warning("Skipping episodic memory for run %s: no acting user on the run", run_id)
-                return
+            # Memory belongs to the agent and the run, not to a user (M113's
+            # created_by_id was only ever the isolation query's scoping key —
+            # see models/memory.py) — so no owner check gates storing it.
             await self._memory_service.episodic.store_run_summary(
                 run_id=run_id,
                 agent_id=self._config.agent_id,
@@ -465,7 +463,6 @@ class AgentRuntime:
                     "prompt_tokens": context.total_prompt_tokens,
                     "completion_tokens": context.total_completion_tokens,
                 },
-                created_by_id=context.owner_id,
             )
         except Exception:
             logger.exception("Failed to store episodic memory for run %s", run_id)

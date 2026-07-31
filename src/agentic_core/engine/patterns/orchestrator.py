@@ -209,6 +209,14 @@ class PatternOrchestrator:
                 run_id=run_id,
                 owner_id=rt._llm_service.principal_id if rt._llm_service else None,
             )
+            # The mirror above was missing this line: RunContext.memory_config_data
+            # defaults to {} (engine/context.py), so without it every pattern-driven
+            # run — which is every real run, since execute_run always wraps the
+            # loop in a PatternOrchestrator — read episodic_memory_enabled as False
+            # in Sense regardless of the agent's actual config. Storage still
+            # worked (AgentRuntime._episodic_memory_enabled reads rt._config
+            # directly, not context), so memory was written but never recalled.
+            context.memory_config_data = rt._config.memory_config_data or {}
 
         # Working memory (returns None if Redis unavailable)
         wm = None

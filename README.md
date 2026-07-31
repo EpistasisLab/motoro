@@ -18,22 +18,24 @@ The scope decisions and the boundary contract live in ARES under
 **A run executes end to end.** Create an agent, create a run, execute it under
 either of the two migrated execution patterns.
 
-63 files / 11,400 LOC — about 15% of the ARES backend. 57 tests pass against a
-real Postgres, including full Sense→Reason→Plan→Act runs under both patterns.
+69 files / 12,600 LOC — about 17% of the ARES backend. 74 tests pass against a
+real Postgres, including full Sense→Reason→Plan→Act runs under both patterns and
+a second run that recalls what the first one stored.
 
 | Landed | |
 |---|---|
 | SRPA loop | `runtime`, `sense`, `reason`, `plan`, `act`, `phase`, `context` |
-| Pattern engine | `base`, `registry`, `orchestrator`, `composition` |
+| Pattern engine | `base`, `registry`, `orchestrator`, `composition`, `catalog` |
 | Patterns | `single_agent_baseline`, `reason_act` — **2 of 37**, added one at a time |
 | LLM bridge | `llm_service` + a pluggable credential resolver |
+| Memory | episodic + semantic (`memory_service`, pgvector-backed), working memory |
 | MCP | `client`, `registry`, `adapters` |
-| Persistence | 5 tables, own Alembic chain, own database, own sessions |
+| Persistence | 6 tables, own Alembic chain, own database, own sessions |
 | Composition root | `agentic_core.runner` — writes (`create_agent`, `create_run`, `execute_run`) and reads (`get_agent`, `get_run`, `get_runs`, `list_runs`, `get_run_steps`, …) |
 | Observability | tracing + metrics, with a configurable instrument prefix |
 
-Not yet here: the other 35 patterns, semantic/episodic memory, the worker, the
-evaluation and scoring subsystems, per-user isolation, users and auth.
+Not yet here: the other 35 patterns, the worker, the evaluation and scoring
+subsystems, per-user isolation, users and auth.
 
 ### Core does not manage users
 
@@ -88,8 +90,9 @@ src/agentic_core/
   config.py           CoreSettings + configure() + the settings proxy
   models/             SQLAlchemy models; models/base.py owns the shared Base
   schemas/            Pydantic contracts
-  services/           LLM bridge, cost, retry, scrubbing
+  services/           LLM bridge, cost, retry, scrubbing, memory service
   mcp/                MCP client, registry, tool adapters
+  memory/             working (Redis), episodic + semantic (pgvector), embedding
   engine/             the SRPA loop, and later the pattern engine
   observability/      tracing + metrics
   security/           prompt-injection fencing (isolation is undecided)
@@ -347,6 +350,71 @@ rather than deleted: core ships 2 of 37 patterns, so "not registered in this
 process" does not mean "does not exist". The upsert is `DO UPDATE`, not `DO
 NOTHING` — a description or schema changed in code must correct the row, which is
 what ARES needed migrations `0009`, `0010` and `0025` to do by hand.
+
+### Memory: episodic and semantic, no owner
+
+Working memory (per-run, Redis) was in slice 1 from the start. Episodic
+(per-agent run summaries) and semantic (global/per-agent knowledge) are backed
+by one `memory_entries` table with a pgvector `embedding` column, behind
+`MemoryService`:
+
+```python
+from agentic_core.services.memory_service import MemoryService
+from agentic_core.services.llm_service import LLMService
+
+memory_service = MemoryService(llm_service=LLMService())
+result = await execute_run(run_id=run.id, memory_service=memory_service)
+```
+
+Both are **opt-in per agent**, off by default:
+`create_agent(..., memory_config={"episodic_memory_enabled": True})` — same
+field, same default as ARES's `MemoryConfig.episodic_memory_enabled`.
+
+**No owner column.** ARES's `MemoryEntry.created_by_id` (`NOT NULL FK ->
+users`) exists for exactly one reason: `security/isolation/registry.py` scopes
+memory rows to the viewer that created them — a per-user isolation feature, out
+of scope for this slice, and the only method reading it that way
+(`list_entries`) is not pulled either. A memory's identity is already
+`agent_id` (which agent it belongs to) and, for episodic entries, `run_id`
+(which run produced it) — both real foreign keys, since `agents`/`agent_runs`
+are core's own tables in the same database. Nothing else is needed to know
+what a memory is; a product enforcing per-user isolation filters on the
+*agent's* `owner_id`, the same way it would for any other agent-scoped data.
+
+Dropping the owner column also removes a real behavior gap: ARES's runtime
+skipped storing episodic memory entirely when a run had no acting user
+(`if context.owner_id is None: return`), because there was nobody to satisfy the
+`NOT NULL` constraint. With no owner concept, storage is unconditional — an
+anonymous or system-triggered run keeps its memory.
+
+**Embedding credentials resolve from settings, not a per-user table.** ARES
+resolves a remote embedding key from the *acting user's* same-vendor LLM
+setting, decrypted per call. Core has no users table to join against, so
+`EmbeddingService` reads `CoreSettings.openai_api_key` directly — the same
+shape as the LLM bridge's credential resolver, for the same reason. An explicit
+`api_key` argument still takes precedence, for a product with its own
+credential store.
+
+**Default backend is local, no API key needed:**
+`embedding_model = "sentence-transformers/BAAI/bge-base-en-v1.5"` runs
+in-process via `sentence-transformers`. Any other model name is a remote
+litellm-supported embedding call instead. The local default is why
+`sentence-transformers` (and its `torch` dependency) installs eagerly for every
+product — worth knowing if disk footprint matters and a product only ever uses
+remote embeddings.
+
+A bug worth naming, because it explains what "the runtime actually uses it"
+means as a test: `PatternOrchestrator.run` builds its own `RunContext` rather
+than reusing `AgentRuntime.run`'s, and that mirror was missing
+`context.memory_config_data = ...`. Since `execute_run` always wraps the loop in
+a `PatternOrchestrator` — for both shipped patterns — Sense read
+`episodic_memory_enabled` as `False` on every real run regardless of the
+agent's config. Storage still worked, because
+`AgentRuntime._episodic_memory_enabled` reads the runtime's own config, not the
+context — so memory was written on every run and recalled on none of them.
+Fixed here; `test_a_second_run_actually_recalls_the_first_runs_memory` is the
+regression test, and it was verified to fail against the reverted bug before
+being kept. **This bug is also present in ARES today.**
 
 ### Setting a provider
 

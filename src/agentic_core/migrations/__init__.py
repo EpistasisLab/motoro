@@ -1,10 +1,10 @@
 """Core's schema, and how a product applies it.
 
-Core's five tables are a **requirement**, not a convenience: nothing in the
-runtime works without ``agents``, ``agent_runs``, ``run_steps``,
-``architectural_patterns`` and ``llm_pricing_overrides``. So core owns them, and
-owns their migration chain. A product does not hand-write migrations for core's
-tables; it runs core's chain and then its own.
+Core's tables are a **requirement**, not a convenience: nothing in the runtime
+works without ``agents``, ``agent_runs``, ``run_steps``, ``architectural_patterns``,
+``llm_pricing_overrides`` and ``memory_entries``. So core owns them, and owns their
+migration chain. A product does not hand-write migrations for core's tables; it
+runs core's chain and then its own.
 
 The database *instance* is a different question and remains the product's: one
 Postgres per deployment, holding core's tables alongside that product's. Core does
@@ -63,6 +63,7 @@ CORE_TABLES = frozenset(
         "run_steps",
         "architectural_patterns",
         "llm_pricing_overrides",
+        "memory_entries",
     }
 )
 

@@ -75,7 +75,10 @@ async def init_schema(*, drop_first: bool = False) -> None:
     database and wrong for anything you intend to migrate later. A test asserts
     both paths produce an identical schema.
     """
+    from sqlalchemy import text
+
     import agentic_core.models.agent  # noqa: F401  PLC0415
+    import agentic_core.models.memory  # noqa: F401  PLC0415
     import agentic_core.models.pattern  # noqa: F401  PLC0415
     import agentic_core.models.pricing  # noqa: F401  PLC0415
     import agentic_core.models.run  # noqa: F401  PLC0415
@@ -86,6 +89,10 @@ async def init_schema(*, drop_first: bool = False) -> None:
     async with engine.begin() as conn:
         if drop_first:
             await conn.run_sync(Base.metadata.drop_all)
+        # Base.metadata.create_all issues CREATE TABLE only — it does not know
+        # about the pgvector extension memory_entries.embedding depends on, so
+        # this mirrors the migration chain's own `CREATE EXTENSION` step.
+        await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
         await conn.run_sync(Base.metadata.create_all)
 
 

@@ -160,7 +160,7 @@ async def test_upgrade_is_idempotent(scratch_dbs: tuple[str, str]) -> None:
 
 
 async def test_chain_owns_only_core_tables() -> None:
-    """The autogenerate filter is confined to core's five tables.
+    """The autogenerate filter is confined to core's own tables.
 
     Core and a product share one ``Base.metadata``; without this filter core's
     autogenerate would see every product table as something to drop.
@@ -177,6 +177,7 @@ async def test_chain_owns_only_core_tables() -> None:
         "run_steps",
         "architectural_patterns",
         "llm_pricing_overrides",
+        "memory_entries",
     }
 
 

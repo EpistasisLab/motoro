@@ -6,11 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 
 # Slice 1 (SRPA loop) dependencies only. Derived from the actual third-party
-# imports of the 31 modules in the slice — not copied wholesale from ARES.
+# imports of the modules in the slice — not copied wholesale from ARES.
 # Deliberately absent, and to stay absent unless a slice genuinely needs them:
 #   fastapi/uvicorn  — core is headless; the product owns the HTTP layer
 #   arq              — arrives with the worker slice
-#   pgvector, sentence-transformers — arrive with semantic memory
 #   python-docx, pymupdf, pyarrow   — dataset/document concerns, product-side
 #   bcrypt, email-validator         — auth concerns, undecided for core
 dependencies = [
@@ -22,6 +21,14 @@ dependencies = [
     # calling agentic_core.migrations.upgrade(). See src/agentic_core/migrations.
     "alembic>=1.18.4",
     "redis>=5.2.0,<6",
+    # Semantic/episodic memory: pgvector is the SQLAlchemy Vector type and the
+    # server-side extension; sentence-transformers is the default *local*
+    # embedding backend (no API key needed). It is imported lazily inside
+    # ``memory.embedding._get_local_model`` rather than at module scope, but it
+    # still installs eagerly as a direct dependency — a remote-only product pays
+    # for it on disk without ever importing it.
+    "pgvector>=0.3.6",
+    "sentence-transformers>=5.4.1",
     # Range, not a pin. Core is a library: pinning an exact litellm would force
     # it on every product and forbid interpreters that version excludes. ARES
     # pins ==1.85.0, which is right for an application — but 1.85.0 requires
