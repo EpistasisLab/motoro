@@ -195,6 +195,9 @@ python examples/run.py --agent-id <id> --input "What is 17 * 23?"
 # ── 3b. RUNTIME, with episodic memory ───────────────────────────────────────
 python examples/memory_run.py --input "My favourite programming language is Rust."
 python examples/memory_run.py --input "What did I say my favourite language was?"
+
+# ── 3c. RUNTIME, with a real MCP tool call ──────────────────────────────────
+python examples/mcp_run.py --input "What is the secret code for alpha?" --trace
 ```
 
 `examples/settings.py` holds the one thing all three share: a `CoreSettings`
@@ -205,6 +208,16 @@ subclass with the product's env prefix.
 the only difference — and demonstrates that memory persists in Postgres across
 process invocations, not just across turns in one process: run it twice and the
 second call recalls what the first one stored.
+
+`mcp_run.py` ties together `services.mcp_service` and the Act phase's existing
+MCP adapter: register `examples/mcp_server.py` once (idempotent, like
+`provision.py`), reconnect it via `hydrate_registry()` on every subsequent
+invocation — a registry that starts empty in this process, the same as a
+worker or a restarted API would — and pass the aggregated tool list into
+`execute_run`. The demo tool (`get_secret_code`) returns a fact the model
+cannot know or guess, so the correct code appearing in the run's output, and
+in `--trace`'s persisted `tool_call`, is unambiguous proof the tool actually
+ran rather than the model reasoning its way to a plausible-looking answer.
 
 **Migrations are a deploy step, not app startup.** Running them per process means
 every replica races the same migration, an API and a worker both try to migrate,
