@@ -57,7 +57,13 @@ def canned(model: type) -> Any:
         )
     if model is ActOutput:
         return ActOutput(results=[], final_response=FINAL_ANSWER, should_continue=False)
-    raise AssertionError(f"StubLLM has no canned value for {model.__name__}")
+    # output_contract builds one-off pydantic models at runtime (every field
+    # optional, per its own contract), so there's nothing to enumerate here by
+    # name — construct with defaults rather than raising for every future one.
+    try:
+        return model()
+    except Exception:
+        raise AssertionError(f"StubLLM has no canned value for {model.__name__}") from None
 
 
 class StubLLM:

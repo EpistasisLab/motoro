@@ -174,6 +174,9 @@ async def create_agent(
     pattern_config: dict[str, Any] | None = None,
     tool_config: dict[str, Any] | None = None,
     memory_config: dict[str, Any] | None = None,
+    output_contract: dict[str, Any] | None = None,
+    budget_limit_usd: float | None = None,
+    max_run_duration_seconds: int | None = None,
     owner_id: uuid.UUID | None = None,
 ) -> Agent:
     """Persist an agent. Names are unique per installation over live rows.
@@ -185,6 +188,11 @@ async def create_agent(
     PatternConfigError` if it names an unregistered pattern, misconfigures one, or
     leaves a dependency unsatisfiable — so a typo fails here rather than after a
     run has been created and a model billed.
+
+    *output_contract*, given, makes :func:`execute_run` run one extraction pass
+    per completed run coercing its free-text output into the contracted fields
+    (see :mod:`agentic_core.services.output_contract`) — exposed on the run's
+    ``output`` as an envelope's ``payload``.
 
     *owner_id* is stored verbatim and never interpreted — core has no users, and
     with a separate product database it could not have a foreign key to one.
@@ -203,6 +211,9 @@ async def create_agent(
         tool_config_data=tool_config or {},
         memory_config_data=memory_config or {},
         pattern_config=pattern_config,
+        output_contract=output_contract,
+        budget_limit_usd=budget_limit_usd,
+        max_run_duration_seconds=max_run_duration_seconds,
         owner_id=owner_id,
     )
     async with _session("create_agent") as db:
@@ -249,6 +260,9 @@ async def update_agent(
     pattern_config: dict[str, Any] | None = None,
     tool_config: dict[str, Any] | None = None,
     memory_config: dict[str, Any] | None = None,
+    output_contract: dict[str, Any] | None = None,
+    budget_limit_usd: float | None = None,
+    max_run_duration_seconds: int | None = None,
 ) -> Agent | None:
     """Update a live agent's fields. ``None`` means "leave unchanged" for every
     parameter here, the same convention ``services.mcp_service.update_server``
@@ -287,6 +301,12 @@ async def update_agent(
             agent.tool_config_data = tool_config
         if memory_config is not None:
             agent.memory_config_data = memory_config
+        if output_contract is not None:
+            agent.output_contract = output_contract
+        if budget_limit_usd is not None:
+            agent.budget_limit_usd = budget_limit_usd
+        if max_run_duration_seconds is not None:
+            agent.max_run_duration_seconds = max_run_duration_seconds
 
         await db.commit()
         await db.refresh(agent)
@@ -488,8 +508,13 @@ async def execute_run(
             run_metadata=run.run_metadata,
         )
 
+        from agentic_core.services.output_contract import finalize_output
+
         run.status = RunStatus(result.status)
-        run.output = result.output
+        run.output = await finalize_output(
+            llm=llm, agent=agent, model_config=model_config, result=result, principal_id=run.owner_id
+        )
+        result.output = run.output  # keep the returned result consistent with the persisted row
         run.error = result.error
         run.token_usage = {
             "prompt_tokens": result.total_prompt_tokens,

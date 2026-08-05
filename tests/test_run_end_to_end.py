@@ -25,7 +25,7 @@ from pydantic_settings import SettingsConfigDict
 
 from agentic_core import CoreSettings
 from agentic_core.schemas.agent import LLMProvider, ModelConfig
-from tests.stub_llm import StubLLM
+from tests.stub_llm import FINAL_ANSWER, StubLLM
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
 
@@ -92,6 +92,47 @@ async def test_full_run(pattern: str) -> None:
     assert RunStatus(stored.status) is RunStatus.COMPLETED
     assert stored.token_usage["prompt_tokens"] > 0
     assert stored.completed_at is not None
+
+
+async def test_output_contract_produces_an_envelope_with_a_payload() -> None:
+    """An agent with an output_contract gets its run.output wrapped in an
+    envelope carrying a payload — the exact mechanism spinal_surgery's
+    DC/FTE/FS/MLM/Critic agents depend on for structured handoffs."""
+    from agentic_core.runner import create_agent, create_run, execute_run
+    from agentic_core.schemas.output import parse_envelope
+
+    stub = StubLLM()
+    agent = await create_agent(
+        name=f"test-output-contract-{uuid.uuid4().hex[:8]}",
+        goal="Review the input and return a verdict.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        pattern_config={"execution_pattern": "reason_act"},
+        output_contract={
+            "name": "TestVerdict",
+            "fields": [
+                {"name": "approved", "type": "bool"},
+                {"name": "feedback", "type": "str", "default": ""},
+            ],
+        },
+    )
+    run = await create_run(agent_id=agent.id, user_input="Review this.")
+
+    result = await execute_run(run_id=run.id, llm_service=stub)
+
+    assert result.error is None, result.error
+    envelope = parse_envelope(result.output)
+    assert envelope is not None, f"run.output was not wrapped in an envelope: {result.output!r}"
+    assert envelope.payload == {"approved": None, "feedback": ""}
+    assert envelope.result == FINAL_ANSWER
+    assert "complete:TestVerdict" in stub.calls
+
+    # The persisted row agrees with what execute_run returned — not just the
+    # in-memory result object.
+    from agentic_core.runner import get_run
+
+    stored = await get_run(run.id)
+    assert stored is not None
+    assert stored.output == result.output
 
 
 async def test_registry_holds_exactly_the_migrated_patterns() -> None:
