@@ -37,11 +37,14 @@ from agentic_core.services.encryption import decrypt, encrypt
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
 
 
-def _session(reason: str) -> Any:
+def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
     from agentic_core.models.database import system_session
 
     return system_session(reason=f"mcp_service: {reason}")

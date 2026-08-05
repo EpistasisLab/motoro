@@ -21,6 +21,10 @@ from agentic_core.models.memory import MemoryEntry, MemoryType
 from agentic_core.observability.tracing import get_tracer
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from agentic_core.memory.embedding import EmbeddingService
 
 _tracer = get_tracer("memory.semantic")
@@ -33,7 +37,7 @@ _tracer = get_tracer("memory.semantic")
 SearchScope = Literal["agent", "global", "any"]
 
 
-def _session(reason: str) -> Any:
+def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
     from agentic_core.models.database import system_session
 
     return system_session(reason=f"memory.semantic: {reason}")

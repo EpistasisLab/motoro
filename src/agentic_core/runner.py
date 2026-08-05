@@ -54,6 +54,9 @@ from agentic_core.schemas.agent import ModelConfig
 if TYPE_CHECKING:
     import asyncio
     from collections.abc import Sequence
+    from contextlib import AbstractAsyncContextManager
+
+    from sqlalchemy.ext.asyncio import AsyncSession
 
     from agentic_core.engine.phase import Phase
     from agentic_core.engine.ports import MemoryServicePort
@@ -102,7 +105,7 @@ async def init_schema(*, drop_first: bool = False) -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _session(reason: str) -> Any:
+def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
     """A session against core's own database.
 
     Private on purpose: sessions are core's to manage. A product that finds

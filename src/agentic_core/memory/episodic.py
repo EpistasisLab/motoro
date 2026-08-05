@@ -17,6 +17,10 @@ from agentic_core.models.memory import MemoryEntry, MemoryType
 from agentic_core.observability.tracing import get_tracer
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
+
+    from sqlalchemy.ext.asyncio import AsyncSession
+
     from agentic_core.memory.embedding import EmbeddingService
     from agentic_core.schemas.agent import ModelConfig
     from agentic_core.services.llm_service import LLMService
@@ -35,7 +39,7 @@ Summarize this agent run in 3-5 sentences. Include:
 Be concise and factual."""
 
 
-def _session(reason: str) -> Any:
+def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
     from agentic_core.models.database import system_session
 
     return system_session(reason=f"memory.episodic: {reason}")
