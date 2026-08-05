@@ -91,7 +91,6 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
             raise
 
 
-
 # Read by ``agentic_core.security.isolation.guard`` to exempt a system session from the
 # do_orm_execute guard (M113 #1469). Duplicated as a literal rather than
 # imported from ``guard.py`` so this module's import graph stays as light as
@@ -121,5 +120,3 @@ async def system_session(*, reason: str) -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
-
-

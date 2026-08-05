@@ -118,6 +118,10 @@ testpaths = ["tests"]
 # --------------------------------------------------------------------------- #
 [tool.importlinter]
 root_packages = ["agentic_core"]
+# ares/ecoxai are external to this repo, not sub-packages of agentic_core —
+# import-linter requires this to evaluate a forbidden-modules contract against
+# a package outside root_packages.
+include_external_packages = true
 
 [[tool.importlinter.contracts]]
 name = "Core never imports a product"

@@ -96,10 +96,7 @@ class LLMProviderNotConfiguredError(LLMError):
         self.purpose = purpose
         if message is None:
             suffix = f" It is required for: {purpose}." if purpose else ""
-            message = (
-                "No LLM provider is configured. Add a provider and API key in "
-                f"Settings to continue.{suffix}"
-            )
+            message = f"No LLM provider is configured. Add a provider and API key in Settings to continue.{suffix}"
         super().__init__(message, original=original)
 
 
