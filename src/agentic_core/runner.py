@@ -246,12 +246,20 @@ async def create_run(
     user_input: str,
     pattern_overrides: dict[str, Any] | None = None,
     owner_id: uuid.UUID | None = None,
+    metadata: dict[str, Any] | None = None,
 ) -> AgentRun:
     """Create a pending run.
 
     Separate from :func:`execute_run` so a product can enqueue the execution
     rather than block on it: create the run in a request, return the id, let a
     worker execute it.
+
+    *metadata* seeds ``run_metadata`` before the run ever starts — the one key
+    the engine itself reads back out is ``workspace_id``: the orchestrator lifts
+    it into ``RunContext.workspace_id`` (see :func:`execute_run`), which
+    ``mcp.adapters`` then sends ambiently on every tool call's request ``_meta``,
+    so a workspace-scoped MCP tool never needs it threaded through arguments a
+    model could omit or corrupt.
     """
     run = AgentRun(
         agent_id=agent_id,
@@ -259,6 +267,7 @@ async def create_run(
         status=RunStatus.PENDING,
         pattern_overrides=pattern_overrides,
         owner_id=owner_id,
+        run_metadata=metadata,
     )
     async with _session("create_run") as db:
         db.add(run)
@@ -350,6 +359,12 @@ async def execute_run(
     a provider. Four methods (``complete``, ``complete_text``,
     ``complete_with_tools``, ``select_tool``) plus a ``principal_id`` property are
     the whole surface the phases use.
+
+    ``run.run_metadata`` — whatever :func:`create_run` was given as *metadata* —
+    is passed to the orchestrator, which lifts a ``workspace_id`` key out of it
+    onto every MCP tool call's ambient ``_meta``. Not otherwise interpreted here;
+    it is not written back afterward, so it still holds exactly what was seeded
+    at creation once this returns.
     """
     from agentic_core.engine.patterns.orchestrator import DEFAULT_EXECUTION_PATTERN, PatternOrchestrator
     from agentic_core.engine.runtime import AgentConfig, AgentRuntime
@@ -397,6 +412,7 @@ async def execute_run(
             run_id=run.id,
             user_input=run.input,
             available_tools=available_tools,
+            run_metadata=run.run_metadata,
         )
 
         run.status = RunStatus(result.status)
