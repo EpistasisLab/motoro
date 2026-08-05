@@ -305,6 +305,7 @@ async def create_run(
     pattern_overrides: dict[str, Any] | None = None,
     owner_id: uuid.UUID | None = None,
     metadata: dict[str, Any] | None = None,
+    model_config_overrides: dict[str, Any] | None = None,
 ) -> AgentRun:
     """Create a pending run.
 
@@ -318,6 +319,13 @@ async def create_run(
     ``mcp.adapters`` then sends ambiently on every tool call's request ``_meta``,
     so a workspace-scoped MCP tool never needs it threaded through arguments a
     model could omit or corrupt.
+
+    *model_config_overrides* is a partial dict shallow-merged onto the agent's
+    own ``model_config_data`` at execute time (see :func:`execute_run`) — e.g.
+    ``{"model": "claude-opus-5", "effort": "xhigh"}`` to vary the model/effort
+    per run without touching the agent's stored configuration. The column this
+    writes (``AgentRun.model_config_overrides``) already existed; nothing
+    previously set it or read it back.
     """
     run = AgentRun(
         agent_id=agent_id,
@@ -326,6 +334,7 @@ async def create_run(
         pattern_overrides=pattern_overrides,
         owner_id=owner_id,
         run_metadata=metadata,
+        model_config_overrides=model_config_overrides,
     )
     async with _session("create_run") as db:
         db.add(run)
@@ -423,6 +432,11 @@ async def execute_run(
     onto every MCP tool call's ambient ``_meta``. Not otherwise interpreted here;
     it is not written back afterward, so it still holds exactly what was seeded
     at creation once this returns.
+
+    ``run.model_config_overrides`` is shallow-merged onto ``agent.model_config_data``
+    before the effective :class:`ModelConfig` is built — a per-run key wins over
+    the agent's own stored value for that key; anything the run doesn't override
+    still comes from the agent.
     """
     from agentic_core.engine.patterns.orchestrator import DEFAULT_EXECUTION_PATTERN, PatternOrchestrator
     from agentic_core.engine.runtime import AgentConfig, AgentRuntime
@@ -435,7 +449,8 @@ async def execute_run(
         ).scalar_one()
         agent = run.agent
 
-        model_config = ModelConfig(**(agent.model_config_data or {}))
+        effective_model_config_data = {**(agent.model_config_data or {}), **(run.model_config_overrides or {})}
+        model_config = ModelConfig(**effective_model_config_data)
         config = AgentConfig(
             agent_id=agent.id,
             goal=agent.goal,
