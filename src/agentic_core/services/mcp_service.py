@@ -26,7 +26,7 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from agentic_core.mcp.client import TransportType
 from agentic_core.mcp.registry import MCPServerRegistry, get_registry
@@ -94,9 +94,18 @@ async def register_server(
     url: str | None = None,
     headers: dict[str, str] | None = None,
     owner_id: uuid.UUID | None = None,
+    is_system: bool = False,
     registry: MCPServerRegistry | None = None,
 ) -> MCPServerConfig:
-    """Validate, connect, and persist a new MCP server registration."""
+    """Validate, connect, and persist a new MCP server registration.
+
+    *is_system* marks a server as platform-provided rather than something a
+    particular user registered — e.g. a product's own bundled tool server,
+    available to every run regardless of owner. Pair with ``owner_id=None``;
+    :func:`list_servers` always includes system rows alongside an owner's own,
+    the same way a run resolves an ``is_system`` agent (``Agent.owner_id``
+    docstring) regardless of who started it.
+    """
     _validate_registration(transport, command, url)
 
     reg = registry or get_registry()
@@ -119,6 +128,7 @@ async def register_server(
         status=MCPServerStatus.CONNECTED if entry.client.connected else MCPServerStatus.ERROR,
         error_message=entry.error,
         owner_id=owner_id,
+        is_system=is_system,
     )
     async with _session("register_server") as db:
         db.add(config)
@@ -144,11 +154,14 @@ async def list_servers(*, owner_id: uuid.UUID | None = None) -> Sequence[MCPServ
 
     A plain filter, not enforcement — core has no viewer to scope against. A
     product doing per-user isolation applies its own check on top, the same way
-    it would for :func:`agentic_core.runner.list_agents`.
+    it would for :func:`agentic_core.runner.list_agents`. When *owner_id* is
+    given, system servers (``is_system=True``) are always included alongside
+    it — a global, platform-provided server is available to every owner by
+    definition, not just the one who happens to be asking.
     """
     stmt = select(MCPServerConfig).order_by(MCPServerConfig.created_at.desc())
     if owner_id is not None:
-        stmt = stmt.where(MCPServerConfig.owner_id == owner_id)
+        stmt = stmt.where(or_(MCPServerConfig.owner_id == owner_id, MCPServerConfig.is_system.is_(True)))
     async with _session("list_servers") as db:
         return (await db.execute(stmt)).scalars().all()
 

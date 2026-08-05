@@ -369,6 +369,32 @@ async def test_list_servers_filters_by_owner() -> None:
 
 
 @needs_db
+async def test_register_server_is_system_and_list_servers_includes_it_for_any_owner() -> None:
+    from agentic_core.mcp.registry import MCPServerRegistry
+    from agentic_core.services.mcp_service import list_servers, register_server
+
+    registry = MCPServerRegistry()
+    system_config = await _with_timeout(
+        register_server(
+            name=f"echo-system-{uuid.uuid4().hex[:8]}",
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            is_system=True,
+            registry=registry,
+        )
+    )
+    try:
+        assert system_config.is_system is True
+        assert system_config.owner_id is None
+
+        # A system server shows up for ANY owner's filtered list, not just its own.
+        someone_elses_view = await list_servers(owner_id=uuid.uuid4())
+        assert system_config.id in {s.id for s in someone_elses_view}
+    finally:
+        await registry.disconnect_all()
+
+
+@needs_db
 async def test_delete_server_unregisters_and_removes_row() -> None:
     from agentic_core.mcp.registry import MCPServerRegistry
     from agentic_core.services.mcp_service import delete_server, get_server, register_server
