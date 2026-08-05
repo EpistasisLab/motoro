@@ -238,6 +238,34 @@ async def test_register_server_connects_and_persists() -> None:
         await registry.disconnect_all()
 
 
+def test_build_run_meta_includes_owner_id() -> None:
+    from agentic_core.engine.context import RunContext
+    from agentic_core.mcp.adapters import META_KEY_OWNER_ID, META_KEY_RUN_ID, META_KEY_WORKSPACE_ID, _build_run_meta
+    from agentic_core.schemas.agent import ModelConfig
+
+    owner = uuid.uuid4()
+    run = uuid.uuid4()
+    context = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(),
+        user_input="u",
+        run_id=run,
+        owner_id=owner,
+        workspace_id="exp1/cellA",
+    )
+    meta = _build_run_meta(context)
+    assert meta == {
+        META_KEY_WORKSPACE_ID: "exp1/cellA",
+        META_KEY_RUN_ID: str(run),
+        META_KEY_OWNER_ID: str(owner),
+    }
+
+    # No ambient identity at all -> None, not an empty dict (unchanged wire call).
+    bare_context = RunContext(agent_goal="g", system_prompt="s", model_config=ModelConfig(), user_input="u")
+    assert _build_run_meta(bare_context) is None
+
+
 @needs_db
 async def test_call_tool_delivers_meta_verbatim() -> None:
     """The exact wire-level guarantee _build_run_meta/execute_step rely on:

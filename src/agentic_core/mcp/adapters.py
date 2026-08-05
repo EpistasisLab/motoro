@@ -32,6 +32,12 @@ _RETRYABLE_FOR_BACKOFF = (ConnectionError, OSError)
 # resolve the current workspace instead of trusting model-supplied arguments.
 META_KEY_WORKSPACE_ID = "agentic_core.workspace_id"
 META_KEY_RUN_ID = "agentic_core.run_id"
+# The run's owner (opaque, product-defined — same attribution tag as
+# Agent.owner_id/AgentRun.owner_id). Lets a tool scope its own data access to
+# the acting user without the model ever being able to pass a different one
+# in arguments — e.g. a shared workspace-management tool checking a dataset's
+# owner_id against this before reading it, rather than trusting a bare name.
+META_KEY_OWNER_ID = "agentic_core.owner_id"
 
 log = structlog.get_logger()
 
@@ -48,6 +54,8 @@ def _build_run_meta(context: RunContext) -> dict[str, Any] | None:
         meta[META_KEY_WORKSPACE_ID] = context.workspace_id
     if context.run_id is not None:
         meta[META_KEY_RUN_ID] = str(context.run_id)
+    if context.owner_id is not None:
+        meta[META_KEY_OWNER_ID] = str(context.owner_id)
     return meta or None
 
 
