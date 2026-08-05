@@ -10,8 +10,9 @@ is test fixture, not a thing a product imports.
 from __future__ import annotations
 
 import json
+from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp import Context, FastMCP
 
 mcp = FastMCP("echo-test-server")
 
@@ -20,6 +21,15 @@ mcp = FastMCP("echo-test-server")
 def echo(text: str) -> str:
     """Return *text* unchanged, prefixed so a caller can tell this tool ran."""
     return f"echo: {text}"
+
+
+@mcp.tool()
+def echo_meta(ctx: Context[Any, Any, Any]) -> str:
+    """Return the ambient MCP request ``_meta`` as JSON — verifies what a tool
+    actually receives (e.g. ``agentic_core.workspace_id``/``owner_id``), not
+    just what the sender intended to build."""
+    meta = ctx.request_context.meta
+    return json.dumps(getattr(meta, "model_extra", None) or {})
 
 
 @mcp.tool()

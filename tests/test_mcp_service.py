@@ -239,6 +239,35 @@ async def test_register_server_connects_and_persists() -> None:
 
 
 @needs_db
+async def test_call_tool_delivers_meta_verbatim() -> None:
+    """The exact wire-level guarantee _build_run_meta/execute_step rely on:
+    whatever dict is passed as ``meta=`` to ``MCPClient.call_tool`` is what a
+    real tool reads back from ``ctx.request_context.meta`` — not just what the
+    sender intended to build. A downstream consumer's own copy of a meta key
+    (e.g. asaree_workspace_core's META_KEY_WORKSPACE_ID) can silently drift
+    from this without either side raising an error, which is exactly what
+    happened before this test existed."""
+    from agentic_core.mcp.registry import MCPServerRegistry
+    from agentic_core.services.mcp_service import register_server
+
+    registry = MCPServerRegistry()
+    name = f"echo-{uuid.uuid4().hex[:8]}"
+    await _with_timeout(register_server(name=name, transport="stdio", command=_ECHO_COMMAND, registry=registry))
+    try:
+        client = registry.servers[name].client
+        sent_meta = {"agentic_core.workspace_id": "exp1/cellA", "agentic_core.owner_id": str(uuid.uuid4())}
+        result = await _with_timeout(client.call_tool("echo_meta", {}, meta=sent_meta))
+        assert not result.is_error
+        import json
+
+        received_meta = json.loads(result.content)
+        for key, value in sent_meta.items():
+            assert received_meta.get(key) == value, f"{key} did not arrive intact: {received_meta}"
+    finally:
+        await registry.disconnect_all()
+
+
+@needs_db
 async def test_register_server_rejects_disallowed_command() -> None:
     from agentic_core.mcp.registry import MCPServerRegistry
     from agentic_core.security.mcp_command_allowlist import MCPCommandError
