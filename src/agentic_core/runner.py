@@ -238,6 +238,61 @@ async def list_agents(*, owner_id: uuid.UUID | None = None, limit: int = 100) ->
         return (await db.execute(stmt)).scalars().all()
 
 
+async def update_agent(
+    agent_id: uuid.UUID,
+    *,
+    name: str | None = None,
+    goal: str | None = None,
+    description: str | None = None,
+    system_prompt: str | None = None,
+    model_config: ModelConfig | None = None,
+    pattern_config: dict[str, Any] | None = None,
+    tool_config: dict[str, Any] | None = None,
+    memory_config: dict[str, Any] | None = None,
+) -> Agent | None:
+    """Update a live agent's fields. ``None`` means "leave unchanged" for every
+    parameter here, the same convention ``services.mcp_service.update_server``
+    uses — there is no way to explicitly clear a field back to empty through
+    this function, only to leave it as it was.
+
+    *pattern_config*, given, is validated the same way :func:`create_agent`
+    validates it — a typo here still fails before a run is created and a model
+    billed, not after.
+
+    Returns ``None`` if *agent_id* does not name a live (non-deleted) agent.
+    """
+    if pattern_config is not None:
+        _require_valid_pattern_config(pattern_config)
+
+    async with _session("update_agent") as db:
+        agent = (
+            await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+        ).scalar_one_or_none()
+        if agent is None:
+            return None
+
+        if name is not None:
+            agent.name = name
+        if goal is not None:
+            agent.goal = goal
+        if description is not None:
+            agent.description = description
+        if system_prompt is not None:
+            agent.system_prompt = system_prompt
+        if model_config is not None:
+            agent.model_config_data = model_config.model_dump(mode="json")
+        if pattern_config is not None:
+            agent.pattern_config = pattern_config
+        if tool_config is not None:
+            agent.tool_config_data = tool_config
+        if memory_config is not None:
+            agent.memory_config_data = memory_config
+
+        await db.commit()
+        await db.refresh(agent)
+        return agent
+
+
 # --------------------------------------------------------------------------- #
 #  Runs                                                                        #
 # --------------------------------------------------------------------------- #
@@ -451,4 +506,5 @@ __all__ = [
     "init_schema",
     "list_agents",
     "list_runs",
+    "update_agent",
 ]
