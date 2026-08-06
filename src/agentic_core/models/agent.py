@@ -19,17 +19,17 @@ class Agent(Base):
 
     __tablename__ = "agents"
 
-    # Names are unique per installation. Case-insensitive, because "Researcher"
-    # and "researcher" are one name to whoever typed it, and only over live
-    # rows, so a soft-deleted agent releases its name.
-    #
-    # ARES scopes this per owner instead (a partial unique index on
-    # ``(created_by_id, lower(name))``). That is a product policy resting on a
-    # ``users`` table core does not have, so a product wanting per-owner names
-    # drops this index and creates its own in its own migration.
+    # Names are unique per owner, case-insensitively ("Researcher" and
+    # "researcher" are one name to whoever typed it), and only over live rows,
+    # so a soft-deleted agent releases its name. Two different owners (or two
+    # NULL-owner rows -- core used standalone, where "owner" is meaningless)
+    # may share a name; Postgres treats every NULL as distinct, so this index
+    # does not actually enforce anything among NULL-owner rows, which is fine
+    # since owner_id is a trusted opaque tag, never itself user input.
     __table_args__ = (
         Index(
-            "uq_agents_name_active",
+            "uq_agents_owner_name_active",
+            "owner_id",
             text("lower(name)"),
             unique=True,
             postgresql_where=text("deleted_at IS NULL"),

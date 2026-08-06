@@ -239,6 +239,29 @@ async def test_create_agent_accepts_a_valid_pattern() -> None:
     assert agent.id is not None
 
 
+@needs_db
+async def test_agent_names_are_unique_per_owner_not_installation() -> None:
+    """uq_agents_owner_name_active scopes the constraint to (owner_id, lower(name))."""
+    from sqlalchemy.exc import IntegrityError
+
+    from agentic_core.runner import create_agent, get_agent_by_name
+
+    name = f"test-perowner-{uuid.uuid4().hex[:8]}"
+    owner_a, owner_b = uuid.uuid4(), uuid.uuid4()
+
+    a = await create_agent(name=name, goal="x", owner_id=owner_a)
+    b = await create_agent(name=name, goal="x", owner_id=owner_b)
+    assert a.id != b.id
+
+    with pytest.raises(IntegrityError):
+        await create_agent(name=name, goal="x", owner_id=owner_a)
+
+    found_a = await get_agent_by_name(name, owner_id=owner_a)
+    found_b = await get_agent_by_name(name, owner_id=owner_b)
+    assert found_a is not None and found_a.id == a.id
+    assert found_b is not None and found_b.id == b.id
+
+
 # --------------------------------------------------------------------------- #
 #  The projection                                                              #
 # --------------------------------------------------------------------------- #

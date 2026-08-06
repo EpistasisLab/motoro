@@ -179,7 +179,7 @@ async def create_agent(
     max_run_duration_seconds: int | None = None,
     owner_id: uuid.UUID | None = None,
 ) -> Agent:
-    """Persist an agent. Names are unique per installation over live rows.
+    """Persist an agent. Names are unique per owner over live rows (case-insensitive).
 
     *pattern_config* selects the execution pattern, e.g.
     ``{"execution_pattern": "single_agent_baseline"}``. ``None`` means the
@@ -231,12 +231,19 @@ async def get_agent(agent_id: uuid.UUID) -> Agent | None:
         ).scalar_one_or_none()
 
 
-async def get_agent_by_name(name: str) -> Agent | None:
-    """Fetch a live agent by name, case-insensitively, or ``None``."""
+async def get_agent_by_name(name: str, *, owner_id: uuid.UUID | None = None) -> Agent | None:
+    """Fetch a live agent by name, case-insensitively, or ``None``.
+
+    Names are unique per owner (``uq_agents_owner_name_active``), not per
+    installation, so *owner_id* should be passed whenever the caller means
+    "does *this owner* already have an agent named X" — e.g. a conflict
+    pre-check before create. Omitting it matches any owner's row, for
+    call sites that only need a single representative agent by name."""
+    stmt = select(Agent).where(func.lower(Agent.name) == name.lower(), Agent.deleted_at.is_(None))
+    if owner_id is not None:
+        stmt = stmt.where(Agent.owner_id == owner_id)
     async with _session("get_agent_by_name") as db:
-        return (
-            await db.execute(select(Agent).where(func.lower(Agent.name) == name.lower(), Agent.deleted_at.is_(None)))
-        ).scalar_one_or_none()
+        return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_agents(*, owner_id: uuid.UUID | None = None, limit: int = 100) -> Sequence[Agent]:
