@@ -38,6 +38,11 @@ META_KEY_RUN_ID = "agentic_core.run_id"
 # in arguments — e.g. a shared workspace-management tool checking a dataset's
 # owner_id against this before reading it, rather than trusting a bare name.
 META_KEY_OWNER_ID = "agentic_core.owner_id"
+# The acting agent's own name and model — raw facts a server can format into
+# whatever actor/attribution convention it needs (e.g. a spec-defined
+# "<agent_name>/<model>" string), rather than core baking in one format.
+META_KEY_AGENT_NAME = "agentic_core.agent_name"
+META_KEY_MODEL = "agentic_core.model"
 
 log = structlog.get_logger()
 
@@ -56,6 +61,16 @@ def _build_run_meta(context: RunContext) -> dict[str, Any] | None:
         meta[META_KEY_RUN_ID] = str(context.run_id)
     if context.owner_id is not None:
         meta[META_KEY_OWNER_ID] = str(context.owner_id)
+    if context.agent_name:
+        # model is nested under agent_name rather than its own independent
+        # check: ModelConfig.model always has a non-empty default, so keying
+        # its inclusion on its own truthiness would put a model key on every
+        # single run, defeating the "no identity -> None" contract above.
+        # Gating on agent_name also matches the one real consumer's need — an
+        # actor string like "<agent_name>/<model>" needs both or neither.
+        meta[META_KEY_AGENT_NAME] = context.agent_name
+        if context.model_config.model:
+            meta[META_KEY_MODEL] = context.model_config.model
     return meta or None
 
 

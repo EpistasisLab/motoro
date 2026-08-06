@@ -42,6 +42,10 @@ class RunContext:
     model_config: ModelConfig
     user_input: str
     agent_id: uuid.UUID | None = None
+    # The agent's own name, carried alongside agent_id (also not part of the
+    # resume snapshot below — both are static config, re-derivable from the
+    # agent row rather than needing to round-trip through a paused run).
+    agent_name: str | None = None
     run_id: uuid.UUID | None = None
     # The user who started this run; LLM callers scope credential resolution to
     # them (M112). Populated by the runtime from its scoped LLMService.

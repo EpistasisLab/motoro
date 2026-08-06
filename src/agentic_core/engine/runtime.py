@@ -60,6 +60,12 @@ class AgentConfig:
     model_config: ModelConfig
     max_iterations: int = 10
     memory_config_data: dict[str, Any] = field(default_factory=dict)
+    # The agent's own name — carried onto RunContext.agent_name so ambient MCP
+    # _meta can identify the acting agent, e.g. for a server that stamps an
+    # actor string like "<agent_name>/<model>" onto what it writes. Defaults to
+    # "" rather than being required so an external AgentConfig construction
+    # that predates this field still works.
+    name: str = ""
 
 
 class AgentRuntime:
@@ -232,6 +238,7 @@ class AgentRuntime:
                 max_iterations=self._config.max_iterations,
                 available_tools=available_tools or [],
                 agent_id=self._config.agent_id,
+                agent_name=self._config.name or None,
                 run_id=run_id,
                 owner_id=self._llm_service.principal_id if self._llm_service else None,
             )

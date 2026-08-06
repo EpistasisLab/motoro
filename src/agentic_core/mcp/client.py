@@ -44,6 +44,11 @@ MCP_DEFAULT_ALLOWED_ENV_VARS: frozenset[str] = frozenset(
         # Shared service secret passed to ARES's own MCP subprocesses so they can
         # authenticate their outbound API calls. NOT a user credential.
         "ARES_INTERNAL_MCP_API_KEY",
+        # Bundle root for core's own OKF server (agentic_core.mcp_servers.okf) —
+        # a directory path, not a secret, so it belongs in the default set
+        # rather than requiring every deployment to configure the allowlist
+        # just to spawn a first-party bundled server.
+        "AGENTIC_OKF_BUNDLE_DIR",
     }
 )
 

@@ -266,6 +266,27 @@ def test_build_run_meta_includes_owner_id() -> None:
     assert _build_run_meta(bare_context) is None
 
 
+def test_build_run_meta_includes_agent_name_and_model_only_together() -> None:
+    from agentic_core.engine.context import RunContext
+    from agentic_core.mcp.adapters import META_KEY_AGENT_NAME, META_KEY_MODEL, _build_run_meta
+    from agentic_core.schemas.agent import ModelConfig
+
+    with_name = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(model="claude-opus-5"),
+        user_input="u",
+        agent_name="SF-DC",
+    )
+    assert _build_run_meta(with_name) == {META_KEY_AGENT_NAME: "SF-DC", META_KEY_MODEL: "claude-opus-5"}
+
+    # model always has a non-empty default; without agent_name it must NOT
+    # appear alone, or every single run would carry a meta dict regardless of
+    # whether anything else is set.
+    without_name = RunContext(agent_goal="g", system_prompt="s", model_config=ModelConfig(), user_input="u")
+    assert _build_run_meta(without_name) is None
+
+
 @needs_db
 async def test_call_tool_delivers_meta_verbatim() -> None:
     """The exact wire-level guarantee _build_run_meta/execute_step rely on:

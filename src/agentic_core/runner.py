@@ -480,6 +480,7 @@ async def execute_run(
         model_config = ModelConfig(**effective_model_config_data)
         config = AgentConfig(
             agent_id=agent.id,
+            name=agent.name,
             goal=agent.goal,
             system_prompt=agent.system_prompt or f"You are {agent.name}. {agent.description}",
             model_config=model_config,

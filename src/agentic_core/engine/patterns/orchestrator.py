@@ -206,6 +206,7 @@ class PatternOrchestrator:
                 max_iterations=rt._config.max_iterations,
                 available_tools=available_tools or [],
                 agent_id=rt._config.agent_id,
+                agent_name=rt._config.name or None,
                 run_id=run_id,
                 owner_id=rt._llm_service.principal_id if rt._llm_service else None,
             )

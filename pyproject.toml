@@ -54,6 +54,13 @@ dependencies = [
     "cryptography>=43.0.0",
     "jsonschema>=4.26.0",
     "structlog>=24.4.0",
+    # YAML frontmatter parsing for the bundled OKF MCP server
+    # (mcp_servers.okf). Already installed transitively today (pulled in by
+    # other deps); declared directly because okf.py imports it by name.
+    "pyyaml>=6.0.3",
+    # Cross-process file locking for the OKF server's concept/log writes.
+    # Same transitively-present-but-declare-directly reasoning as pyyaml.
+    "filelock>=3.32.2",
     "opentelemetry-api>=1.42.0",
     "opentelemetry-sdk>=1.41.1",
     "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
@@ -105,7 +112,7 @@ strict = true
 plugins = ["pydantic.mypy"]
 
 [[tool.mypy.overrides]]
-module = ["litellm.*", "instructor.*", "mcp.*", "jsonschema.*", "prometheus_client.*", "grpc.*"]
+module = ["litellm.*", "instructor.*", "mcp.*", "jsonschema.*", "prometheus_client.*", "grpc.*", "yaml.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
