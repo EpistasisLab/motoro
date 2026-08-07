@@ -38,7 +38,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentic}
       POSTGRES_DB: ${POSTGRES_DB:-agentic_core}
     ports:
-      - "${POSTGRES_PORT:-5453}:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       # Creates the separate test database on first boot. The test suite drops
