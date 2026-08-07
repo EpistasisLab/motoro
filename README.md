@@ -134,7 +134,7 @@ Products pin core by tag, not by raw commit SHA:
 
 ```toml
 [tool.uv.sources]
-agentic-core = { git = "https://github.com/jay-m-dev/agentic-core.git", tag = "v0.1.0" }
+agentic-core = { git = "https://github.com/EpistasisLab/agentic-core.git", tag = "v0.1.0" }
 ```
 
 Tags follow semver (`vMAJOR.MINOR.PATCH`) against core's own public surface —
