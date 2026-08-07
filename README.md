@@ -128,6 +128,36 @@ Nothing in core hardcodes a product's identity. `otel_service_name` and
 `metrics_prefix` both default to `agentic-core`, so a product that forgets to
 override them will at least not claim to be a different product.
 
+### Versioning
+
+Products pin core by tag, not by raw commit SHA:
+
+```toml
+[tool.uv.sources]
+agentic-core = { git = "https://github.com/jay-m-dev/agentic-core.git", tag = "v0.1.0" }
+```
+
+Tags follow semver (`vMAJOR.MINOR.PATCH`) against core's own public surface —
+the package-root export (`configure`, `CoreSettings`, lifecycle) and each
+module a product is expected to import from directly (settings, MCP client,
+patterns, memory). Bump MINOR for additive changes (a new setting, a new
+pattern, a new MCP helper), PATCH for a fix that doesn't change any product's
+required code, and MAJOR for anything that requires a product to change how
+it calls core.
+
+To cut a release: land the change on `main`, confirm the products that
+consume core still work against it (there's no cross-repo CI for this yet —
+check manually), then tag and push:
+
+```bash
+git tag -a v0.2.0 -m "..."
+git push origin v0.2.0
+```
+
+A `rev = "<sha>"` pin is still fine for a one-off, unreleased fix a product
+needs immediately — cut a tag for it once it's confirmed working rather than
+leaving the product on a bare commit indefinitely.
+
 ## Migration tool
 
 ```bash
