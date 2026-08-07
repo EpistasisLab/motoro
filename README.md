@@ -6,46 +6,12 @@ them.
 
 Core ships **no `FastAPI` application, no routers, and no UI**. A product owns its
 HTTP layer, its frontend, and its own domain tables, and depends on core for the
-machinery. Two products are planned on top of it: `ares` (an experiment harness
-whose subject is the agent pipeline) and `ecoxai`.
+machinery. `ASAREE` builds on it today; `ecoxai` is planned.
 
-Extracted from [ARES](https://github.com/EpistasisLab/ARES) one slice at a time.
-The scope decisions and the boundary contract live in ARES under
-`project_plan/CORE_SPLIT_INVENTORY.md` and `project_plan/AGENTIC_CORE_BOUNDARY.md`.
+## Core does not manage users
 
-## Status
-
-**A run executes end to end.** Create an agent, create a run, execute it under
-either of the two migrated execution patterns.
-
-72 files / 13,400 LOC — about 18% of the ARES backend. 98 tests pass against a
-real Postgres, including full Sense→Reason→Plan→Act runs under both patterns, a
-second run that recalls what the first one stored, and a live MCP server
-registered in one process and reconnected in a second, unrelated one.
-
-| Landed | |
-|---|---|
-| SRPA loop | `runtime`, `sense`, `reason`, `plan`, `act`, `phase`, `context` |
-| Pattern engine | `base`, `registry`, `orchestrator`, `composition`, `catalog` |
-| Patterns | `single_agent_baseline`, `reason_act` — **2 of 37**, added one at a time |
-| LLM bridge | `llm_service` + a pluggable credential resolver |
-| Memory | episodic + semantic (`memory_service`, pgvector-backed), working memory |
-| MCP | `client`, `registry`, `adapters` (transport) + `mcp_service` (persisted registration) |
-| Persistence | 7 tables, own Alembic chain, own database, own sessions |
-| Composition root | `agentic_core.runner` — writes (`create_agent`, `create_run`, `execute_run`) and reads (`get_agent`, `get_run`, `get_runs`, `list_runs`, `get_run_steps`, …) |
-| Observability | tracing + metrics, with a configurable instrument prefix |
-
-Not yet here: the other 35 patterns, the worker, the evaluation and scoring
-subsystems, per-user isolation, users and auth.
-
-### Core does not manage users
-
-Core owns agents, runs, steps, tools, memory, and patterns — the Agent Runtime
-and Service Layer of the ARES architecture diagram. It has **no** user model, no
-authentication, no tokens, and no ownership columns. That matches the data model
-documented in ARES `docs/ARCHITECTURE.md`, whose core entities carry
-`created_at`/`updated_at` and no owner at all; the ownership columns arrived
-later, with per-user isolation.
+Core owns agents, runs, steps, tools, memory, and patterns. It has **no** user
+model, no authentication, no tokens, and no ownership columns.
 
 Consequences, each of which is a decision rather than an omission:
 
@@ -65,7 +31,7 @@ never resolves it — it is a `UUID`, not a foreign key, and cannot become one:
 `users` lives in a different database. Enforcing that the owner exists is the
 product's job, on its own side of the boundary.
 
-### Deliberately excluded from slice 1
+## Deliberately excluded, for now
 
 Each of these was measured as separable, not assumed to be:
 
@@ -97,8 +63,6 @@ src/agentic_core/
   engine/             the SRPA loop, and later the pattern engine
   observability/      tracing + metrics
   security/           prompt-injection fencing (isolation is undecided), MCP command allowlist, SSRF guard
-scripts/
-  pull_from_ares.py   the migration tool — see below
 tests/
 ```
 
@@ -114,7 +78,7 @@ from pydantic_settings import SettingsConfigDict
 from agentic_core import CoreSettings, configure
 
 class Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_prefix="ARES_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="ASAREE_", env_file=".env", extra="ignore")
     # product-only fields here
 
 configure(Settings())   # before any core module reads a setting
@@ -157,38 +121,6 @@ git push origin v0.2.0
 A `rev = "<sha>"` pin is still fine for a one-off, unreleased fix a product
 needs immediately — cut a tag for it once it's confirmed working rather than
 leaving the product on a bare commit indefinitely.
-
-## Migration tool
-
-```bash
-export ARES_SRC=~/dev/ARES/backend/src/ares
-
-python scripts/pull_from_ares.py --step 1          # pull a dependency-ordered step
-python scripts/pull_from_ares.py models.agent      # or named modules
-python scripts/pull_from_ares.py --verify          # check what is on disk
-```
-
-`REQUIRED_EDITS` in that script lists every module that must **not** be copied
-verbatim, with what has to change — the ownership columns on `models.agent` and
-`models.run`, `scoped_session` on `models.database`, the credential resolver in
-`services.llm_service`. Pulling one prints the note. That list exists because
-`models/base.py` was pulled mechanically and brought `OwnedMixin` — two
-`ForeignKey("users.id")` columns — into a core that does not manage users. A
-rewritten import is visible in a diff; a schema dependency smuggled in by a mixin
-is not.
-
-`--verify` asserts two invariants over everything already pulled, and should pass
-before the next step starts:
-
-1. **No module references `ares` in code.** Docstrings are exempt (prose about
-   the split legitimately names ARES); string defaults, identifiers, and
-   instrument names are not. `# ares-ok` opts a line out.
-2. **Every internal import resolves** to a module that has actually been pulled,
-   so each step is self-contained.
-
-Rewriting imports is the easy half. The check exists for the other half — a
-hardcoded `"ares-backend"` default or an `ares_` metric name survives a
-mechanical pass and quietly makes core impersonate a product.
 
 ## Development
 
@@ -585,7 +517,7 @@ A product that keeps credentials elsewhere installs its own resolver:
 
 ```python
 from agentic_core.services.credentials import set_credential_resolver
-set_credential_resolver(my_resolver)   # ARES reads an encrypted per-user table
+set_credential_resolver(my_resolver)   # ASAREE reads a per-user settings table
 ```
 
 ### Core's backing services are a requirement
