@@ -58,6 +58,36 @@ Core's only package-root export is lifecycle; everything else is imported from
 its own module (settings, MCP client, patterns, memory, ...) — see
 `docs/DESIGN.md` for why there's no facade.
 
+## Using core in a product
+
+A product does not run a script or shell out to a CLI — it imports the same
+functions directly into wherever its own request handling already lives (a
+FastAPI router, a Django view, a worker task, anything). This is the actual
+integration shape; the `examples/` CLI walkthrough further down
+("Running the examples") is for trying core out, not for a real product to
+run.
+
+```python
+from agentic_core.runner import create_agent, create_run, execute_run
+from agentic_core.mcp.registry import get_registry
+
+# e.g. behind POST /agents — once; agents are durable resources
+agent = await create_agent(
+    name="my-agent", goal="...", system_prompt="...",
+    model_config={"provider": "anthropic", "model": "claude-sonnet-5"},
+    owner_id=user.id,
+)
+
+# e.g. behind POST /runs — per request
+run = await create_run(agent_id=agent.id, user_input=user_input, owner_id=user.id)
+await execute_run(run_id=run.id, registry=get_registry(), available_tools=[...])
+```
+
+`create_run` and `execute_run` are separate calls so a product *can* enqueue
+execution instead of blocking on it (create the run in the request, execute it
+in a worker) — calling both inline in the same request, like above, is just
+as valid; core has no opinion on which a product picks.
+
 ## Requirements
 
 Core requires **PostgreSQL and Redis**. A product provisions both, points
@@ -104,10 +134,11 @@ set -a && . ./.env && set +a
 .venv/bin/lint-imports                  # core must never import a product
 ```
 
-### How a product uses core — three phases
+### Running the examples
 
-`examples/` is laid out as the three phases a product genuinely has; only the
-third belongs on a request path.
+`examples/` walks the same functions shown above from a bare CLI, laid out as
+the three phases a product genuinely has — useful for seeing core work end to
+end with no HTTP app around it, not something a real product runs.
 
 ```bash
 # 1. DEPLOY STEP — once per release, before the app starts
@@ -131,6 +162,4 @@ python examples/mcp_run.py --input "What is the secret code for alpha?" --trace
 
 `examples/settings.py` holds the one thing all three share: a `CoreSettings`
 subclass with the product's env prefix. See `docs/DESIGN.md` for why
-migrations are a deploy step rather than run at app startup, and how
-`create_run`/`execute_run` being separate calls lets a product enqueue
-execution instead of blocking on it.
+migrations are a deploy step rather than run at app startup.
