@@ -15,14 +15,14 @@ model, no authentication, no tokens, and no ownership columns.
 
 Consequences, each of which is a decision rather than an omission:
 
-- **No `OwnedMixin`.** The ARES original adds `created_by_id` / `updated_by_id`
-  as `ForeignKey("users.id")`. Since `users` would be a *product* table, that is
-  a core→product foreign key, which the boundary forbids.
+- **No `OwnedMixin`.** A mixin adding `created_by_id` / `updated_by_id` as
+  `ForeignKey("users.id")` would be a core→product foreign key, since `users`
+  is a product table — the boundary forbids that.
 - **No `UserSummary`.** It is an attribution DTO for API responses, and core has
   no API to respond with.
-- **`agents.created_by_id` and `agent_runs.started_by_id` do not come across.**
-  Both are `NOT NULL` in ARES, so importing them would mean core could not store
-  an agent or a run without a user.
+- **No `created_by_id`/`started_by_id` on agents or runs.** A `NOT NULL` owner
+  column would mean core could not store an agent or a run without a user,
+  which core has no model for.
 
 A product that wants ownership keeps its `users` table in its own database and
 passes an **opaque, nullable, un-constrained `owner_id`** to `create_agent` /
@@ -254,10 +254,11 @@ objects are usable after core closes its session — core's sessionmaker sets
 
 1. **No cross-database foreign keys.** A product row that refers to a run stores
    an opaque `UUID` with no `ForeignKey`, so the database will not enforce that
-   the run exists or cascade its deletion. Measured for ARES: 46 foreign keys
-   point into `agents` / `agent_runs` / `run_steps`, but only **5 of them, across
-   3 tables** (`plan`, `discovery`, `research_experiment`), are product-side. The
-   other 24 tables are core's own and keep their constraints intact.
+   the run exists or cascade its deletion. In practice this is felt in few
+   places: most tables that would want a foreign key into `agents` /
+   `agent_runs` / `run_steps` are core's own; a product typically only needs
+   one from a handful of its own tables (a plan, an experiment record, and
+   similar).
 2. **No cross-database joins.** Instead of joining product rows against
    `agent_runs`, a product collects run ids and calls `get_runs(ids)` — one extra
    round trip, and an N+1 if written carelessly. That is why `get_runs` takes a
@@ -295,16 +296,16 @@ class ReasonActPlugin(PatternPlugin):
     configuration_schema = {...}          # every property carries a `default`
 ```
 
-ARES keeps this in the `architectural_patterns` table, seeded by a data migration,
-and that costs it real bugs:
+A common alternative is keeping this in a database table, seeded by a data
+migration — that costs real bugs:
 
 - **Validation depends on a migration having run.** An unseeded table rejects
   *every* agent with "Unknown pattern slug". Core has a test that creates an agent
   successfully against a deliberately emptied table.
-- **Code and catalog drift.** Renaming `solo_agent_loop` to
-  `single_agent_baseline` left the dependency arrays pointing at the old slug, and
-  needed migration `0009` to chase it through data. A test now fails if any
-  declared dependency names an unregistered pattern.
+- **Code and catalog drift.** Renaming a pattern's slug leaves any stored
+  dependency array pointing at the old name unless a migration chases it
+  through data by hand. A test now fails if any declared dependency names an
+  unregistered pattern.
 - **Defaults exist twice.** The schema the UI renders and the
   `params.get(key, literal)` fallback inside `configure()` are two copies free to
   disagree. A test asserts they match.
@@ -312,14 +313,11 @@ and that costs it real bugs:
   which plugins exist. Here it is derived: the class is discoverable, so the
   pattern is implemented.
 
-Two latent bugs surfaced when these attributes were declared, because ARES's
-`from_pattern_config` reads `dependencies` off the plugin class — where nothing
-ever set it, so its dependency auto-resolution was unreachable code. Both are
-fixed in core and both are in ARES: `collect_missing_dependencies` is called
-without `category_map` (`orchestrator.py:767`), and the composition check is passed
-metadata for only the *active* slugs. Either one makes a pattern that depends on
-another in its own singleton category — `reason_act` on `single_agent_baseline` —
-fail with "requires X, which is not active."
+Declaring `dependencies` on the plugin class also means composition is checked
+at agent-creation time: a pattern that depends on another in its own singleton
+category (`reason_act` on `single_agent_baseline`) fails fast with "requires X,
+which is not active" instead of surfacing as unreachable auto-resolution code
+somewhere the model has already been billed.
 
 **Core never reads the table.** `sync_pattern_catalog()` writes it, one way, as a
 deploy step, for products that need to query the catalog — a patterns page, an
@@ -334,12 +332,13 @@ rows = await list_catalog(implemented_only=True)
 Rows for patterns that are not registered are reported as `stale` and left alone
 rather than deleted: core ships 2 of 37 patterns, so "not registered in this
 process" does not mean "does not exist". The upsert is `DO UPDATE`, not `DO
-NOTHING` — a description or schema changed in code must correct the row, which is
-what ARES needed migrations `0009`, `0010` and `0025` to do by hand.
+NOTHING` — a description or schema changed in code corrects the row automatically
+on the next `sync_pattern_catalog()`, rather than needing a hand-written
+migration to chase it through data.
 
 ### Memory: episodic and semantic, no owner
 
-Working memory (per-run, Redis) was in slice 1 from the start. Episodic
+Working memory (per-run, Redis) has been here from the start. Episodic
 (per-agent run summaries) and semantic (global/per-agent knowledge) are backed
 by one `memory_entries` table with a pgvector `embedding` column, behind
 `MemoryService`:
@@ -353,33 +352,27 @@ result = await execute_run(run_id=run.id, memory_service=memory_service)
 ```
 
 Both are **opt-in per agent**, off by default:
-`create_agent(..., memory_config={"episodic_memory_enabled": True})` — same
-field, same default as ARES's `MemoryConfig.episodic_memory_enabled`.
+`create_agent(..., memory_config={"episodic_memory_enabled": True})`.
 
-**No owner column.** ARES's `MemoryEntry.created_by_id` (`NOT NULL FK ->
-users`) exists for exactly one reason: `security/isolation/registry.py` scopes
-memory rows to the viewer that created them — a per-user isolation feature, out
-of scope for this slice, and the only method reading it that way
-(`list_entries`) is not pulled either. A memory's identity is already
-`agent_id` (which agent it belongs to) and, for episodic entries, `run_id`
-(which run produced it) — both real foreign keys, since `agents`/`agent_runs`
-are core's own tables in the same database. Nothing else is needed to know
-what a memory is; a product enforcing per-user isolation filters on the
-*agent's* `owner_id`, the same way it would for any other agent-scoped data.
+**No owner column.** A memory's identity is already `agent_id` (which agent it
+belongs to) and, for episodic entries, `run_id` (which run produced it) — both
+real foreign keys, since `agents`/`agent_runs` are core's own tables in the
+same database. Nothing else is needed to know what a memory is. A per-user
+isolation feature (scoping memory rows to whoever created them) is out of
+scope for core and would need an owner column core otherwise has no use for —
+a product enforcing that filters on the *agent's* `owner_id` instead, the same
+way it would for any other agent-scoped data.
 
-Dropping the owner column also removes a real behavior gap: ARES's runtime
-skipped storing episodic memory entirely when a run had no acting user
-(`if context.owner_id is None: return`), because there was nobody to satisfy the
-`NOT NULL` constraint. With no owner concept, storage is unconditional — an
-anonymous or system-triggered run keeps its memory.
+An owner column also invites a specific failure mode this design avoids:
+skipping storage entirely when a run has no acting user, because nothing
+satisfies a `NOT NULL` constraint. With no owner concept, storage is
+unconditional — an anonymous or system-triggered run keeps its memory too.
 
-**Embedding credentials resolve from settings, not a per-user table.** ARES
-resolves a remote embedding key from the *acting user's* same-vendor LLM
-setting, decrypted per call. Core has no users table to join against, so
-`EmbeddingService` reads `CoreSettings.openai_api_key` directly — the same
-shape as the LLM bridge's credential resolver, for the same reason. An explicit
-`api_key` argument still takes precedence, for a product with its own
-credential store.
+**Embedding credentials resolve from settings, not a per-user table.** Core
+has no users table to join against, so `EmbeddingService` reads
+`CoreSettings.openai_api_key` directly — the same shape as the LLM bridge's
+credential resolver, for the same reason. An explicit `api_key` argument still
+takes precedence, for a product with its own credential store.
 
 **Default backend is local, no API key needed:**
 `embedding_model = "sentence-transformers/BAAI/bge-base-en-v1.5"` runs
@@ -400,13 +393,13 @@ agent's config. Storage still worked, because
 context — so memory was written on every run and recalled on none of them.
 Fixed here; `test_a_second_run_actually_recalls_the_first_runs_memory` is the
 regression test, and it was verified to fail against the reverted bug before
-being kept. **This bug is also present in ARES today.**
+being kept.
 
 ### MCP: the client was already done; this adds persistence
 
 `agentic_core.mcp` (`client`, `registry`, `adapters`) is transport — connect,
-discover tools, call a tool — and was already a byte-for-byte port of ARES's,
-wired into the Act phase from the start. What was missing is the other half:
+discover tools, call a tool — wired into the Act phase from the start. What
+was missing is the other half:
 remembering *which* servers a product uses, so a fresh process — a worker, a
 restarted API, a new script invocation — doesn't have to re-register them by
 hand. That's `services.mcp_service` + `models.mcp_server.MCPServerConfig`.
@@ -432,19 +425,19 @@ read back into a live connection.
 
 **`owner_id`, same severance as `Agent`/`AgentRun`/`MemoryEntry`** —
 `created_by_id: NOT NULL FK -> users` becomes opaque, nullable, no foreign key.
-One thing is dropped outright rather than made opaque: ARES's `source_plan_id`
-(`FK -> plan_records`) records that a server was proposed by the Plan Builder —
-a fact about a product feature, not about the server, and an opaque UUID would
+One category of field is dropped outright rather than made opaque: anything
+recording which product *feature* proposed or created a resource (e.g. a
+`source_plan_id` naming which planning tool suggested this server) — that's a
+fact about a product feature, not about the server, and an opaque UUID would
 still encode a product concept core has no business referencing at all.
 
-Two self-contained security modules came across unchanged, because they have
-zero coupling to anything ARES- or user-specific: `security.mcp_command_allowlist`
-(a stdio command's executable must be one of `python`/`node`/`npx`/…, and no
-shell metacharacters) and `security.ssrf_guard` (an http/sse URL must not
-resolve to a private/reserved IP, guarding against DNS rebinding too). ARES
-enforces the URL check at its API schema layer; core has no schema layer for
-this, so `register_server`/`update_server` call it directly — the one place
-every registration passes through regardless of caller.
+Two self-contained security modules have zero coupling to anything user- or
+product-specific: `security.mcp_command_allowlist` (a stdio command's
+executable must be one of `python`/`node`/`npx`/…, and no shell
+metacharacters) and `security.ssrf_guard` (an http/sse URL must not resolve to
+a private/reserved IP, guarding against DNS rebinding too). Core has no API
+schema layer, so `register_server`/`update_server` call it directly — the one
+place every registration passes through regardless of caller.
 
 `services.encryption` (Fernet, for a registered server's auth headers) is
 **not** a per-user secret like the embedding-credential lookup it sits next to
@@ -454,7 +447,7 @@ every row core encrypts. That's what makes it portable with no adaptation.
 #### A real bug, found by finally testing this against a live server
 
 No existing test had ever connected `MCPClient` to an actual MCP server before
-this slice's tests did. Two defects surfaced immediately, both now fixed and
+these tests did. Two defects surfaced immediately, both now fixed and
 regression-tested:
 
 - **`mcp>=1.27.1` (an unbounded floor) resolves to `mcp==2.0.0` on a fresh
@@ -463,8 +456,8 @@ regression-tested:
   `notifications/tools/list_changed`), and 2.0.0 changed the background
   message-reading task's lifecycle so the process never exits. Verified
   directly: an identical connect-then-list-tools call returns immediately under
-  `1.27.1` (what ARES actually locks in its lockfile) and hangs indefinitely
-  under `2.0.0`. `pyproject.toml` now caps `mcp>=1.27.1,<2.0.0`.
+  `1.27.1` and hangs indefinitely under `2.0.0`. `pyproject.toml` now caps
+  `mcp>=1.27.1,<2.0.0`.
 - **`MCPServerRegistry.disconnect_all()`'s `asyncio.gather()` broke anyio's
   cancel-scope contract.** Each stdio client's transport is an anyio task group,
   and anyio requires cancel scopes to be exited in exact LIFO order, by the same
@@ -573,8 +566,8 @@ or `api:` service ever appears in it, the boundary has slipped.**
 - **`agentic-core-migrate` is the one non-service service**: it applies core's
   schema and exits. Core owns the schema, so applying it is core's job — that is
   not the same as core shipping an app. The invariant above still holds.
-- **Ports 5453 / 6381**, offset from the ARES stack (5452/6379/6380) and any
-  other local stack, so they can all run at once.
+- **Ports 5453 / 6381**, offset from Postgres/Redis's own defaults (5432/6379)
+  so this can run alongside another local stack without colliding.
 - **Two databases**: `agentic_core` for development, `agentic_core_test` for the
   suite — which drops and recreates its schema per test, so it must not share a
   database with anything you want to keep. Created by
