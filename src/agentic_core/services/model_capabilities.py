@@ -81,6 +81,7 @@ DEFAULT_CAPABILITIES = ModelCapabilities(
 # Registry keyed by normalized (lowercase, provider-prefix-stripped) model id.
 # Substring matching covers date-suffixed / Foundry-deployed variants.
 _REGISTRY: dict[str, ModelCapabilities] = {
+    "claude-opus-5": _EFFORT_ONLY,
     "claude-opus-4-8": _EFFORT_ONLY,
     "claude-opus-4-7": _EFFORT_ONLY,
     "claude-fable-5": _EFFORT_ONLY,
@@ -131,6 +132,7 @@ def _entry(provider: str, model: str, label: str) -> ModelCatalogEntry:
 # temperature-vs-effort toggle and the SDK. Not exhaustive; arbitrary model strings
 # still resolve via get_capabilities (defaulting to temperature-based).
 CATALOG: list[ModelCatalogEntry] = [
+    _entry("anthropic", "claude-opus-5", "Claude Opus 5"),
     _entry("anthropic", "claude-opus-4-8", "Claude Opus 4.8"),
     _entry("anthropic", "claude-opus-4-7", "Claude Opus 4.7"),
     _entry("anthropic", "claude-fable-5", "Claude Fable 5"),
