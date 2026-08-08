@@ -135,6 +135,67 @@ async def test_output_contract_produces_an_envelope_with_a_payload() -> None:
     assert stored.output == result.output
 
 
+async def test_fail_run_forces_a_non_terminal_run_to_failed() -> None:
+    """fail_run closes out a run that execute_run never got to finish —
+    the case a stale-run sweep needs: the process running execute_run died,
+    so nothing else will ever write a terminal status onto this row."""
+    from agentic_core.models.run import RunStatus
+    from agentic_core.runner import create_agent, create_run, fail_run, get_run
+
+    agent = await create_agent(
+        name=f"test-fail-run-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+    )
+    run = await create_run(agent_id=agent.id, user_input="What is 2 + 2?")
+    assert run.status is RunStatus.PENDING
+
+    failed = await fail_run(run.id, error="worker lost — no heartbeat for >= 300s")
+
+    assert failed is not None
+    assert failed.status is RunStatus.FAILED
+    assert failed.error == "worker lost — no heartbeat for >= 300s"
+    assert failed.completed_at is not None
+
+    stored = await get_run(run.id)
+    assert stored is not None
+    assert stored.status is RunStatus.FAILED
+    assert stored.error == failed.error
+
+
+async def test_fail_run_is_a_noop_on_an_already_terminal_run() -> None:
+    """A detector racing against a slow-but-live execute_run commit must not
+    clobber the status/error/completed_at execute_run already wrote."""
+    from agentic_core.models.run import RunStatus
+    from agentic_core.runner import create_agent, create_run, execute_run, fail_run, get_run
+
+    stub = StubLLM()
+    agent = await create_agent(
+        name=f"test-fail-run-noop-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+    )
+    run = await create_run(agent_id=agent.id, user_input="What is 2 + 2?")
+    await execute_run(run_id=run.id, llm_service=stub)
+
+    completed = await get_run(run.id)
+    assert completed is not None
+    assert completed.status is RunStatus.COMPLETED
+
+    result = await fail_run(run.id, error="should never be written")
+
+    assert result is not None
+    assert result.status is RunStatus.COMPLETED
+    assert result.error != "should never be written"
+    assert result.completed_at == completed.completed_at
+
+
+async def test_fail_run_on_an_unknown_run_returns_none() -> None:
+    from agentic_core.runner import fail_run
+
+    assert await fail_run(uuid.uuid4(), error="no such run") is None
+
+
 async def test_registry_holds_exactly_the_migrated_patterns() -> None:
     """Only the two patterns we chose are registered.
 

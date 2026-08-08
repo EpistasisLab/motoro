@@ -541,11 +541,44 @@ async def execute_run(
         return result
 
 
+_TERMINAL_RUN_STATUSES = frozenset({RunStatus.COMPLETED, RunStatus.FAILED, RunStatus.CANCELLED})
+
+
+async def fail_run(run_id: uuid.UUID, *, error: str) -> AgentRun | None:
+    """Force a non-terminal run to FAILED from outside :func:`execute_run`.
+
+    The only way a run's status otherwise changes is :func:`execute_run`'s own
+    commit, written by whichever process is holding the loop. That leaves no
+    path to close out a run whose process died mid-flight (killed worker,
+    crashed host) — a product that wants to detect and fail such a run (e.g. a
+    stale-run sweep keyed on ``AgentRun.last_heartbeat_at``) needs a way in from
+    outside. This is that way in.
+
+    No-op, returning the run unchanged, if it is already terminal (COMPLETED,
+    FAILED or CANCELLED) — so a detector racing against a slow-but-live
+    :func:`execute_run` commit can't clobber a status it already wrote. PENDING,
+    RUNNING, PAUSED and AWAITING_HUMAN are all still forceable; the caller
+    decides which of those it considers stale.
+    """
+    async with _session("fail_run") as db:
+        run = (await db.execute(select(AgentRun).where(AgentRun.id == run_id))).scalar_one_or_none()
+        if run is None or run.status in _TERMINAL_RUN_STATUSES:
+            return run
+        run.status = RunStatus.FAILED
+        run.error = error
+        run.completed_at = datetime.now(tz=UTC)
+        run.state_snapshot = None
+        await db.commit()
+        await db.refresh(run)
+        return run
+
+
 __all__ = [
     "build_phases",
     "create_agent",
     "create_run",
     "execute_run",
+    "fail_run",
     "get_agent",
     "get_agent_by_name",
     "get_run",
