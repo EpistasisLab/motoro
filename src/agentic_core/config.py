@@ -62,6 +62,18 @@ class CoreSettings(BaseSettings):
     bedrock_region: str = Field(default="", validation_alias="AWS_REGION")
 
     # LLM bridge
+    #
+    # Per-attempt cap on a single completion (asyncio.wait_for around the
+    # litellm call; retried up to 3x via tenacity on a timeout, so a stuck
+    # attempt costs up to ~3x this before the run fails). Deployment-
+    # dependent, not a core concern: extended-thinking / high reasoning-
+    # effort completions and large tool-call contexts can legitimately run
+    # well past the 120s default. Raise it in your product's own settings
+    # (env-prefixed, e.g. ASAREE_LLM_CALL_TIMEOUT_SECONDS) if you see runs
+    # failing with a "Hook '...' timed out after {hook_timeout_seconds}s"
+    # abort -- that message names hook_timeout_seconds regardless of which
+    # inner timeout actually fired, so a fast per-attempt timeout here is a
+    # common misdiagnosed cause.
     llm_call_timeout_seconds: int = 120
     # Instructor retries for structured-output validation failures.
     llm_structured_max_retries: int = 3
@@ -77,6 +89,16 @@ class CoreSettings(BaseSettings):
 
     # Pattern engine. Read by the orchestrator's hook pipeline, so these arrived
     # with the pattern engine rather than with the bare SRPA loop.
+    #
+    # Wraps one hook invocation (e.g. one reason_act PRE_ACT turn), not a
+    # whole run and not a whole multi-run workflow. Also deployment-
+    # dependent like llm_call_timeout_seconds above -- the 30s default is
+    # tuned for a generic core deployment, not for a slow provider or a hook
+    # that itself makes a full LLM call. Keep this comfortably above
+    # llm_call_timeout_seconds (which it wraps indirectly): if the two are
+    # close, a slow completion trips this outer timeout instead of the
+    # inner one, and the resulting error is harder to diagnose because it
+    # reports this value, not the inner timeout that actually applies.
     hook_timeout_seconds: int = 30
     # When True, a pattern hook returning a wrong-typed value (a BaseModel that
     # is not the expected phase output, or any non-None / non-HookAction object)
