@@ -11,3 +11,4 @@ build/
 .coverage
 htmlcov/
 .env
+local_setup/
