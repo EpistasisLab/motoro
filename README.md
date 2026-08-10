@@ -18,12 +18,16 @@ real bugs that shaped each of those decisions.
 ```
 src/agentic_core/
   config.py           CoreSettings + configure() + the settings proxy
+  runner.py           create_agent/create_run/execute_run/fail_run — the public lifecycle
   models/             SQLAlchemy models; models/base.py owns the shared Base
   schemas/            Pydantic contracts
   services/           LLM bridge, cost, retry, scrubbing, memory service, MCP registration, encryption
   mcp/                MCP client, registry, tool adapters (transport only)
+  mcp_servers/        bundled, ready-to-register MCP servers that ship with core itself
   memory/             working (Redis), episodic + semantic (pgvector), embedding
   engine/             the SRPA loop, and later the pattern engine
+  migrations/         Alembic environment + versions for core's own database
+  worker/             long-running worker helpers (e.g. DB connection resilience)
   observability/      tracing + metrics
   security/           prompt-injection fencing (isolation is undecided), MCP command allowlist, SSRF guard
 tests/
@@ -88,6 +92,20 @@ execution instead of blocking on it (create the run in the request, execute it
 in a worker) — calling both inline in the same request, like above, is just
 as valid; core has no opinion on which a product picks.
 
+```python
+from agentic_core.runner import fail_run
+
+# e.g. a stale-run sweep keyed on AgentRun.last_heartbeat_at
+await fail_run(run_id=run.id, error="worker died mid-flight")
+```
+
+`execute_run`'s own commit is the only thing that normally moves a run out of
+a non-terminal status. `fail_run` is the way in from outside that loop — for a
+run whose process died (killed worker, crashed host) with nothing left to
+close it out. It's a no-op on a run that's already COMPLETED, FAILED or
+CANCELLED, so a detector racing a slow-but-live `execute_run` can't clobber a
+status it already wrote.
+
 ## Requirements
 
 Core requires **PostgreSQL and Redis**. A product provisions both, points
@@ -118,6 +136,27 @@ settings prefix. A product with its own credential store installs a resolver:
 from agentic_core.services.credentials import set_credential_resolver
 set_credential_resolver(my_resolver)   # e.g. ASAREE reads a per-user settings table
 ```
+
+### Model capabilities
+
+Not every model accepts `temperature`. Adaptive-thinking models (Opus 4.7/4.8,
+Sonnet 5, Fable 5) 400 on an explicit `temperature` and are steered instead
+with an `effort` dial (`low | medium | high | xhigh | max`). `model_config`
+doesn't need to know which regime a model is in — the LLM bridge resolves it
+per call via `agentic_core.services.model_capabilities`, the single source of
+truth other products (and their own GUI/SDK) resolve against too.
+
+### Timeouts
+
+`llm_call_timeout_seconds` (default 120) caps a single completion attempt, and
+`hook_timeout_seconds` (default 30) wraps one pattern-hook invocation around
+it — both are deployment-dependent, not a core concern, and both are plain
+`CoreSettings` fields a product overrides in its own subclass. Keep
+`hook_timeout_seconds` comfortably above `llm_call_timeout_seconds`: the abort
+error always names `hook_timeout_seconds` regardless of which of the two
+actually fired, so a run failing with a "Hook '...' timed out after 30s"
+message is often really the inner LLM-call timeout being too tight for a
+slow provider or a high reasoning-effort completion.
 
 ## Development
 
