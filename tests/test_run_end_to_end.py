@@ -196,6 +196,66 @@ async def test_fail_run_on_an_unknown_run_returns_none() -> None:
     assert await fail_run(uuid.uuid4(), error="no such run") is None
 
 
+async def test_list_runs_metadata_filter_matches_exactly() -> None:
+    """list_runs(metadata=...) filters server-side on run_metadata, not just
+    agent_id/status/owner_id -- the gap that let a product (ASAREE's
+    spinal_pipeline notebook) pull *every* run for an agent and filter by its
+    own experiment_id/treatment_group/replicate client-side in Python, which
+    silently truncated once the agent had more total runs than list_runs's
+    default limit. A dict with two matching keys must exclude a run that
+    only satisfies one of them, and a mismatched value on an existing key
+    must exclude a run entirely, not just "not select" it."""
+    from agentic_core.runner import create_agent, create_run, execute_run, list_runs
+
+    stub = StubLLM()
+    agent = await create_agent(
+        name=f"test-metadata-filter-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+    )
+    target = await create_run(
+        agent_id=agent.id, user_input="q1", metadata={"experiment_id": "exp-1", "replicate": 3}
+    )
+    await execute_run(run_id=target.id, llm_service=stub)
+    other_replicate = await create_run(
+        agent_id=agent.id, user_input="q2", metadata={"experiment_id": "exp-1", "replicate": 4}
+    )
+    await execute_run(run_id=other_replicate.id, llm_service=stub)
+    other_experiment = await create_run(
+        agent_id=agent.id, user_input="q3", metadata={"experiment_id": "exp-2", "replicate": 3}
+    )
+    await execute_run(run_id=other_experiment.id, llm_service=stub)
+
+    matched = await list_runs(agent_id=agent.id, metadata={"experiment_id": "exp-1", "replicate": 3})
+
+    assert [r.id for r in matched] == [target.id]
+
+
+async def test_list_runs_metadata_filter_beyond_limit_still_finds_the_match() -> None:
+    """The whole point: a match older than `limit` newest runs is still
+    found, because the filter runs in SQL before the limit is applied --
+    not after pulling the `limit` most-recent rows and filtering in Python."""
+    from agentic_core.runner import create_agent, create_run, execute_run, list_runs
+
+    stub = StubLLM()
+    agent = await create_agent(
+        name=f"test-metadata-filter-limit-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+    )
+    target = await create_run(agent_id=agent.id, user_input="oldest", metadata={"experiment_id": "exp-old"})
+    await execute_run(run_id=target.id, llm_service=stub)
+    for i in range(5):
+        r = await create_run(agent_id=agent.id, user_input=f"filler-{i}", metadata={"experiment_id": "exp-new"})
+        await execute_run(run_id=r.id, llm_service=stub)
+
+    # limit=1: without server-side filtering this would only see the single
+    # newest run (an "exp-new" one) and never find the older "exp-old" match.
+    matched = await list_runs(agent_id=agent.id, metadata={"experiment_id": "exp-old"}, limit=1)
+
+    assert [r.id for r in matched] == [target.id]
+
+
 async def test_registry_holds_exactly_the_migrated_patterns() -> None:
     """Only the two patterns we chose are registered.
 

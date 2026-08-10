@@ -395,9 +395,24 @@ async def list_runs(
     agent_id: uuid.UUID | None = None,
     status: RunStatus | None = None,
     owner_id: uuid.UUID | None = None,
+    metadata: dict[str, Any] | None = None,
     limit: int = 100,
 ) -> Sequence[AgentRun]:
-    """List runs, newest first, optionally filtered."""
+    """List runs, newest first, optionally filtered.
+
+    ``metadata``, if given, requires every key/value pair to match exactly
+    against ``run_metadata`` (``run_metadata->>key = value``, cast to text —
+    ``run_metadata`` is a plain, product-opaque JSON blob core never
+    interprets, so this is a generic equality filter, not anything
+    schema-aware). This is the server-side alternative to a product pulling
+    *every* run for an agent and filtering client-side in Python: that
+    approach silently truncates once the agent has more runs than ``limit``
+    (a product filtering its own runs by e.g. an experiment id it stamped
+    into metadata has no way to know it happened, since nothing errors —
+    the result set is just quietly incomplete). Filtering here means
+    ``limit`` only has to be large enough for what actually matches, not for
+    the agent's entire history.
+    """
     stmt = select(AgentRun)
     if agent_id is not None:
         stmt = stmt.where(AgentRun.agent_id == agent_id)
@@ -405,6 +420,9 @@ async def list_runs(
         stmt = stmt.where(AgentRun.status == status)
     if owner_id is not None:
         stmt = stmt.where(AgentRun.owner_id == owner_id)
+    if metadata:
+        for key, value in metadata.items():
+            stmt = stmt.where(AgentRun.run_metadata[key].astext == str(value))
     stmt = stmt.order_by(AgentRun.created_at.desc()).limit(limit)
     async with _session("list_runs") as db:
         return (await db.execute(stmt)).scalars().all()
