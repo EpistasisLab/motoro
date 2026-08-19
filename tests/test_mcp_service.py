@@ -23,7 +23,7 @@ Three things worth pinning:
    ``mcp<2.0.0``; the wrapped tests below additionally guard with an explicit
    timeout so a future regression fails fast instead of hanging the suite.
 
-Database-backed tests are skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set.
+Database-backed tests are skipped unless ``MOTORO_TEST_DATABASE_URL`` is set.
 """
 
 from __future__ import annotations
@@ -40,8 +40,8 @@ from pydantic_settings import SettingsConfigDict
 
 from motoro import CoreSettings
 
-DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
-needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
+DB_URL = os.environ.get("MOTORO_TEST_DATABASE_URL", "")
+needs_db = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is not set")
 
 _FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
 _ECHO_COMMAND = f"{sys.executable} {_FIXTURE_SERVER}"
@@ -52,7 +52,7 @@ _LIVE_TIMEOUT = 15
 
 
 class _Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MOTORO_TEST_", extra="ignore")
 
 
 @pytest.fixture(scope="module", autouse=True)

@@ -13,7 +13,7 @@ Three things worth pinning:
    ARES's runtime skipped storage when a run had no acting user; nothing gates
    it here, because nothing needs to own the entry for it to exist.
 
-Database-backed tests are skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set.
+Database-backed tests are skipped unless ``MOTORO_TEST_DATABASE_URL`` is set.
 They use the real default local embedding model (``sentence-transformers/
 BAAI/bge-base-en-v1.5``) rather than a mock — it is fast once cached and this is
 the actual default a product gets with no configuration.
@@ -30,12 +30,12 @@ from pydantic_settings import SettingsConfigDict
 
 from motoro import CoreSettings
 
-DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
-needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
+DB_URL = os.environ.get("MOTORO_TEST_DATABASE_URL", "")
+needs_db = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is not set")
 
 
 class _Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MOTORO_TEST_", extra="ignore")
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -93,7 +93,7 @@ def _reconfigure(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
     from motoro.config import configure, reset_for_testing
 
     class _Local(CoreSettings):
-        model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_LOCAL_", extra="ignore", populate_by_name=True)
+        model_config = SettingsConfigDict(env_prefix="MOTORO_TEST_LOCAL_", extra="ignore", populate_by_name=True)
 
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)  # ambient leakage guard
     reset_for_testing()

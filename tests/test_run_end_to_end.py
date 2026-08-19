@@ -8,9 +8,9 @@ The LLM is a stub, deliberately: a test that needs a provider key is a test nobo
 runs. The four methods stubbed here are the entire surface the phases use, which
 is itself worth pinning — if a future slice widens it, this fails.
 
-Skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set, e.g.::
+Skipped unless ``MOTORO_TEST_DATABASE_URL`` is set, e.g.::
 
-    AGENTIC_TEST_DATABASE_URL='postgresql+asyncpg://ares:pw@localhost:5452/motoro_test' \
+    MOTORO_TEST_DATABASE_URL='postgresql+asyncpg://ares:pw@localhost:5452/motoro_test' \
         .venv/bin/pytest tests/test_run_end_to_end.py -v
 """
 
@@ -27,13 +27,13 @@ from motoro import CoreSettings
 from motoro.schemas.agent import LLMProvider, ModelConfig
 from tests.stub_llm import FINAL_ANSWER, StubLLM
 
-DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
+DB_URL = os.environ.get("MOTORO_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is not set")
 
 
 class _Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MOTORO_TEST_", extra="ignore")
 
 
 @pytest.fixture(scope="module", autouse=True)

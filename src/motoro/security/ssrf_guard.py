@@ -154,7 +154,7 @@ def validate_outbound_url(
     allow_private:
         If ``True``, skip the bare-IP and DNS-resolution private-network
         checks.  Use only in trusted dev/research deployments via
-        ``AGENTIC_MCP_ALLOW_PRIVATE_URLS (or your product's prefix)=true``.  Scheme and host presence
+        ``MOTORO_MCP_ALLOW_PRIVATE_URLS (or your product's prefix)=true``.  Scheme and host presence
         checks still apply.
     """
     if not url or not url.strip():

@@ -8,7 +8,7 @@ Two things worth pinning:
 2. Core's chain must use its own version table and touch only core's tables, so a
    product's chain can run alongside it without either stamping over the other.
 
-Skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set. These tests create and drop
+Skipped unless ``MOTORO_TEST_DATABASE_URL`` is set. These tests create and drop
 their own scratch databases on that server rather than using that database, since
 comparing two schemas needs two of them.
 """
@@ -24,9 +24,9 @@ from pydantic_settings import SettingsConfigDict
 
 from motoro import CoreSettings
 
-DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
+DB_URL = os.environ.get("MOTORO_TEST_DATABASE_URL", "")
 
-pytestmark = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
+pytestmark = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is not set")
 
 COLUMNS_SQL = """
 SELECT table_name || '.' || column_name || ':' || data_type || ':' || is_nullable

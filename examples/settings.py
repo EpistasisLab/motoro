@@ -20,7 +20,7 @@ from motoro import CoreSettings
 class Settings(CoreSettings):
     """Stands in for a real product's settings class."""
 
-    model_config = SettingsConfigDict(env_prefix="AGENTIC_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MOTORO_", env_file=".env", extra="ignore")
 
     # A real product adds its own fields here — its API host, its feature flags,
     # its own domain configuration. Core never sees them.

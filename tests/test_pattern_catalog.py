@@ -9,7 +9,7 @@ Three things are worth pinning:
    idempotent.
 3. The catalog and the code cannot drift, because there is only one copy.
 
-The database tests are skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set.
+The database tests are skipped unless ``MOTORO_TEST_DATABASE_URL`` is set.
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ from pydantic_settings import SettingsConfigDict
 
 from motoro import CoreSettings
 
-DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
-needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
+DB_URL = os.environ.get("MOTORO_TEST_DATABASE_URL", "")
+needs_db = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is not set")
 
 
 class _Settings(CoreSettings):
-    model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_", extra="ignore")
+    model_config = SettingsConfigDict(env_prefix="MOTORO_TEST_", extra="ignore")
 
 
 @pytest.fixture(scope="module", autouse=True)

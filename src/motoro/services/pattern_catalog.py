@@ -15,7 +15,7 @@ overwritten by the next sync.
 
 Run it as a deploy step, next to the migration::
 
-    python -m motoro.migrations sync-catalog --url "$AGENTIC_DATABASE_URL"
+    python -m motoro.migrations sync-catalog --url "$MOTORO_DATABASE_URL"
 
 ``is_implemented`` is not stored data here but a derived fact: a pattern is
 implemented when its plugin class is discoverable. ARES maintains that column by

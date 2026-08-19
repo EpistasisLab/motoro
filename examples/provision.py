@@ -7,7 +7,7 @@ it. That is an admin action, a seed script, a CI task — never the request path
 Note what is *not* here: no session, no core models, no schema. Core owns its own
 database. The schema is applied separately, once, as a deploy step::
 
-    python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"
+    python -m motoro.migrations upgrade --url "$MOTORO_DATABASE_URL"
 
 Usage::
 

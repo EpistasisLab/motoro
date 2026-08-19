@@ -20,8 +20,8 @@ So core exposes this as a CLI rather than doing it for you. An application shoul
 migrate. ``current`` is the check.
 
 ``--url`` is explicit because core cannot know a product's settings prefix: a
-product reading ``ARES_DATABASE_URL`` or ``AGENTIC_DATABASE_URL`` passes it
-through (``--url "$AGENTIC_DATABASE_URL"``). With no flag, ``DATABASE_URL`` from
+product reading ``ARES_DATABASE_URL`` or ``MOTORO_DATABASE_URL`` passes it
+through (``--url "$MOTORO_DATABASE_URL"``). With no flag, ``DATABASE_URL`` from
 the environment or ``.env`` is used.
 """
 

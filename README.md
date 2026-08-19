@@ -113,7 +113,7 @@ Core requires **PostgreSQL and Redis**. A product provisions both, points
 deploy step:
 
 ```bash
-python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"   # core's DB
+python -m motoro.migrations upgrade --url "$MOTORO_DATABASE_URL"   # core's DB
 alembic upgrade head                                                     # the product's own DB
 ```
 
@@ -183,7 +183,7 @@ end with no HTTP app around it, not something a real product runs.
 # 1. DEPLOY STEP — once per release, before the app starts
 docker compose up -d                    # the motoro-migrate service does this
 # ...or, without Compose:
-python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"
+python -m motoro.migrations upgrade --url "$MOTORO_DATABASE_URL"
 
 # 2. PROVISIONING — once; agents are durable resources
 python examples/provision.py            # prints the agent id; idempotent by name
