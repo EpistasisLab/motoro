@@ -16,9 +16,9 @@ from pathlib import Path
 
 import pytest
 
-import agentic_core
+import motoro
 
-SRC = Path(agentic_core.__file__).parent
+SRC = Path(motoro.__file__).parent
 
 STEP_0 = [
     "config",
@@ -44,7 +44,7 @@ def test_module_imports(mod: str) -> None:
     pulls in ``email-validator`` at class-construction time rather than via an
     import statement. Only actually importing the module finds that.
     """
-    importlib.import_module(f"agentic_core.{mod}")
+    importlib.import_module(f"motoro.{mod}")
 
 
 def _iter_source() -> list[tuple[Path, str]]:
@@ -111,15 +111,15 @@ def test_every_internal_import_resolves() -> None:
     This is what keeps a slice self-contained: a step is done when nothing in it
     reaches for a module that is still only in ARES.
     """
-    present = {name for _, name, _ in pkgutil.walk_packages([str(SRC)], prefix="agentic_core.")} | {"agentic_core"}
+    present = {name for _, name, _ in pkgutil.walk_packages([str(SRC)], prefix="motoro.")} | {"motoro"}
     offenders: list[str] = []
     for path, text in _iter_source():
         for node in ast.walk(ast.parse(text)):
             targets: list[str] = []
-            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("agentic_core"):
+            if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("motoro"):
                 targets = [node.module]
             elif isinstance(node, ast.Import):
-                targets = [a.name for a in node.names if a.name.startswith("agentic_core")]
+                targets = [a.name for a in node.names if a.name.startswith("motoro")]
             for t in targets:
                 if t not in present:
                     offenders.append(f"{path.relative_to(SRC)}:{node.lineno}: {t}")
@@ -128,11 +128,11 @@ def test_every_internal_import_resolves() -> None:
 
 def test_defaults_do_not_claim_a_product_identity() -> None:
     """An unconfigured core identifies as itself, not as a product."""
-    from agentic_core import CoreSettings
+    from motoro import CoreSettings
 
     s = CoreSettings()
-    assert s.otel_service_name == "agentic-core"
-    assert s.metrics_prefix == "agentic_core"
+    assert s.otel_service_name == "motoro"
+    assert s.metrics_prefix == "motoro"
     assert "ares" not in s.database_url
 
 
@@ -142,7 +142,7 @@ def test_configure_rejects_late_reconfiguration() -> None:
     Half a process on defaults and half on the product's values is far harder to
     diagnose than a startup failure.
     """
-    from agentic_core.config import CoreSettings, configure, get_settings, reset_for_testing
+    from motoro.config import CoreSettings, configure, get_settings, reset_for_testing
 
     reset_for_testing()
     try:
@@ -188,9 +188,9 @@ def test_migration_chain_stays_installable_without_runtime_deps() -> None:
     probe = textwrap.dedent(f"""
         import importlib, sys
         # Exactly what migrations/env.py imports to populate Base.metadata.
-        for m in ("agentic_core.models.agent", "agentic_core.models.pattern",
-                  "agentic_core.models.pricing", "agentic_core.models.run",
-                  "agentic_core.migrations"):
+        for m in ("motoro.models.agent", "motoro.models.pattern",
+                  "motoro.models.pricing", "motoro.models.run",
+                  "motoro.migrations"):
             importlib.import_module(m)
         tops = {{n.split(".")[0] for n in sys.modules}}
         print(",".join(sorted(tops & set({forbidden!r}))))

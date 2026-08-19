@@ -10,7 +10,7 @@ is itself worth pinning — if a future slice widens it, this fails.
 
 Skipped unless ``AGENTIC_TEST_DATABASE_URL`` is set, e.g.::
 
-    AGENTIC_TEST_DATABASE_URL='postgresql+asyncpg://ares:pw@localhost:5452/agentic_core_test' \
+    AGENTIC_TEST_DATABASE_URL='postgresql+asyncpg://ares:pw@localhost:5452/motoro_test' \
         .venv/bin/pytest tests/test_run_end_to_end.py -v
 """
 
@@ -23,8 +23,8 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
-from agentic_core.schemas.agent import LLMProvider, ModelConfig
+from motoro import CoreSettings
+from motoro.schemas.agent import LLMProvider, ModelConfig
 from tests.stub_llm import FINAL_ANSWER, StubLLM
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
@@ -38,7 +38,7 @@ class _Settings(CoreSettings):
 
 @pytest.fixture(scope="module", autouse=True)
 def _configure() -> None:
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     reset_for_testing()
     configure(_Settings(database_url=DB_URL))
@@ -51,8 +51,8 @@ async def _schema() -> Any:
     The engine is disposed rather than left cached because asyncpg connections
     belong to the loop that opened them, and each test here gets its own loop.
     """
-    from agentic_core.models.database import dispose_engine
-    from agentic_core.runner import init_schema
+    from motoro.models.database import dispose_engine
+    from motoro.runner import init_schema
 
     await init_schema(drop_first=True)
     yield
@@ -62,8 +62,8 @@ async def _schema() -> Any:
 @pytest.mark.parametrize("pattern", ["single_agent_baseline", "reason_act"])
 async def test_full_run(pattern: str) -> None:
     """A run executes end to end and persists its steps."""
-    from agentic_core.models.run import RunStatus
-    from agentic_core.runner import create_agent, create_run, execute_run, get_run, get_run_steps
+    from motoro.models.run import RunStatus
+    from motoro.runner import create_agent, create_run, execute_run, get_run, get_run_steps
 
     stub = StubLLM()
     # No session anywhere: core owns its database and manages its own connections.
@@ -98,8 +98,8 @@ async def test_output_contract_produces_an_envelope_with_a_payload() -> None:
     """An agent with an output_contract gets its run.output wrapped in an
     envelope carrying a payload — the exact mechanism spinal_surgery's
     DC/FTE/FS/MLM/Critic agents depend on for structured handoffs."""
-    from agentic_core.runner import create_agent, create_run, execute_run
-    from agentic_core.schemas.output import parse_envelope
+    from motoro.runner import create_agent, create_run, execute_run
+    from motoro.schemas.output import parse_envelope
 
     stub = StubLLM()
     agent = await create_agent(
@@ -128,7 +128,7 @@ async def test_output_contract_produces_an_envelope_with_a_payload() -> None:
 
     # The persisted row agrees with what execute_run returned — not just the
     # in-memory result object.
-    from agentic_core.runner import get_run
+    from motoro.runner import get_run
 
     stored = await get_run(run.id)
     assert stored is not None
@@ -139,8 +139,8 @@ async def test_fail_run_forces_a_non_terminal_run_to_failed() -> None:
     """fail_run closes out a run that execute_run never got to finish —
     the case a stale-run sweep needs: the process running execute_run died,
     so nothing else will ever write a terminal status onto this row."""
-    from agentic_core.models.run import RunStatus
-    from agentic_core.runner import create_agent, create_run, fail_run, get_run
+    from motoro.models.run import RunStatus
+    from motoro.runner import create_agent, create_run, fail_run, get_run
 
     agent = await create_agent(
         name=f"test-fail-run-{uuid.uuid4().hex[:8]}",
@@ -166,8 +166,8 @@ async def test_fail_run_forces_a_non_terminal_run_to_failed() -> None:
 async def test_fail_run_is_a_noop_on_an_already_terminal_run() -> None:
     """A detector racing against a slow-but-live execute_run commit must not
     clobber the status/error/completed_at execute_run already wrote."""
-    from agentic_core.models.run import RunStatus
-    from agentic_core.runner import create_agent, create_run, execute_run, fail_run, get_run
+    from motoro.models.run import RunStatus
+    from motoro.runner import create_agent, create_run, execute_run, fail_run, get_run
 
     stub = StubLLM()
     agent = await create_agent(
@@ -191,7 +191,7 @@ async def test_fail_run_is_a_noop_on_an_already_terminal_run() -> None:
 
 
 async def test_fail_run_on_an_unknown_run_returns_none() -> None:
-    from agentic_core.runner import fail_run
+    from motoro.runner import fail_run
 
     assert await fail_run(uuid.uuid4(), error="no such run") is None
 
@@ -205,7 +205,7 @@ async def test_list_runs_metadata_filter_matches_exactly() -> None:
     default limit. A dict with two matching keys must exclude a run that
     only satisfies one of them, and a mismatched value on an existing key
     must exclude a run entirely, not just "not select" it."""
-    from agentic_core.runner import create_agent, create_run, execute_run, list_runs
+    from motoro.runner import create_agent, create_run, execute_run, list_runs
 
     stub = StubLLM()
     agent = await create_agent(
@@ -235,7 +235,7 @@ async def test_list_runs_metadata_filter_beyond_limit_still_finds_the_match() ->
     """The whole point: a match older than `limit` newest runs is still
     found, because the filter runs in SQL before the limit is applied --
     not after pulling the `limit` most-recent rows and filtering in Python."""
-    from agentic_core.runner import create_agent, create_run, execute_run, list_runs
+    from motoro.runner import create_agent, create_run, execute_run, list_runs
 
     stub = StubLLM()
     agent = await create_agent(
@@ -262,7 +262,7 @@ async def test_registry_holds_exactly_the_migrated_patterns() -> None:
     Discovery imports every module in ``engine/patterns/builtin``, so this fails
     the moment a plugin is added without a decision to add it.
     """
-    from agentic_core.engine.patterns.registry import PluginRegistry
+    from motoro.engine.patterns.registry import PluginRegistry
 
     PluginRegistry.discover(raise_on_error=True)
     assert sorted(PluginRegistry.all()) == ["reason_act", "single_agent_baseline"]

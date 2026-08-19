@@ -38,7 +38,7 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
+from motoro import CoreSettings
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
 needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
@@ -57,7 +57,7 @@ class _Settings(CoreSettings):
 
 @pytest.fixture(scope="module", autouse=True)
 def _configure() -> None:
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     if not DB_URL:
         return
@@ -71,9 +71,9 @@ async def _schema() -> Any:
     if not DB_URL:
         yield
         return
-    from agentic_core.models.database import dispose_engine
-    from agentic_core.runner import init_schema
-    from agentic_core.services.encryption import reset_for_testing as reset_encryption
+    from motoro.models.database import dispose_engine
+    from motoro.runner import init_schema
+    from motoro.services.encryption import reset_for_testing as reset_encryption
 
     reset_encryption()
     await init_schema(drop_first=True)
@@ -91,7 +91,7 @@ async def _with_timeout(coro: Any) -> Any:
 
 
 def test_mcp_server_config_owner_id_is_opaque() -> None:
-    from agentic_core.models.mcp_server import MCPServerConfig
+    from motoro.models.mcp_server import MCPServerConfig
 
     columns = {c.name for c in MCPServerConfig.__table__.columns}
     assert "owner_id" in columns
@@ -106,46 +106,46 @@ def test_mcp_server_config_owner_id_is_opaque() -> None:
 
 
 # --------------------------------------------------------------------------- #
-#  Security modules — self-contained, no ares/agentic_core coupling            #
+#  Security modules — self-contained, no ares/motoro coupling            #
 # --------------------------------------------------------------------------- #
 
 
 def test_command_allowlist_accepts_known_executables() -> None:
-    from agentic_core.security.mcp_command_allowlist import validate_stdio_command
+    from motoro.security.mcp_command_allowlist import validate_stdio_command
 
     validate_stdio_command("python server.py")
     validate_stdio_command("npx -y some-mcp-server")
 
 
 def test_command_allowlist_rejects_unknown_executable() -> None:
-    from agentic_core.security.mcp_command_allowlist import MCPCommandError, validate_stdio_command
+    from motoro.security.mcp_command_allowlist import MCPCommandError, validate_stdio_command
 
     with pytest.raises(MCPCommandError, match="not in the allowed list"):
         validate_stdio_command("bash -c 'echo hi'")
 
 
 def test_command_allowlist_rejects_shell_metacharacters() -> None:
-    from agentic_core.security.mcp_command_allowlist import MCPCommandError, validate_stdio_command
+    from motoro.security.mcp_command_allowlist import MCPCommandError, validate_stdio_command
 
     with pytest.raises(MCPCommandError, match="shell meta-character"):
         validate_stdio_command("python server.py; rm -rf /")
 
 
 def test_ssrf_guard_rejects_private_ip() -> None:
-    from agentic_core.security.ssrf_guard import SSRFError, validate_outbound_url
+    from motoro.security.ssrf_guard import SSRFError, validate_outbound_url
 
     with pytest.raises(SSRFError, match="private/reserved"):
         validate_outbound_url("http://169.254.169.254/", resolve_dns=False)
 
 
 def test_ssrf_guard_allows_private_ip_when_opted_in() -> None:
-    from agentic_core.security.ssrf_guard import validate_outbound_url
+    from motoro.security.ssrf_guard import validate_outbound_url
 
     validate_outbound_url("http://192.168.1.5/", resolve_dns=False, allow_private=True)
 
 
 def test_ssrf_guard_rejects_file_scheme() -> None:
-    from agentic_core.security.ssrf_guard import SSRFError, validate_outbound_url
+    from motoro.security.ssrf_guard import SSRFError, validate_outbound_url
 
     with pytest.raises(SSRFError, match="not permitted"):
         validate_outbound_url("file:///etc/passwd")
@@ -174,16 +174,16 @@ def _restore_module_settings() -> None:
     baseline back rather than leaving settings unconfigured for whatever runs
     next.
     """
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     reset_for_testing()
     configure(_Settings(encryption_key=_TEST_ENCRYPTION_KEY, **_db_kwargs()))
 
 
 def test_encryption_round_trips() -> None:
-    from agentic_core.config import configure, reset_for_testing
-    from agentic_core.services.encryption import decrypt, encrypt
-    from agentic_core.services.encryption import reset_for_testing as reset_encryption
+    from motoro.config import configure, reset_for_testing
+    from motoro.services.encryption import decrypt, encrypt
+    from motoro.services.encryption import reset_for_testing as reset_encryption
 
     reset_for_testing()
     reset_encryption()
@@ -198,9 +198,9 @@ def test_encryption_round_trips() -> None:
 
 
 def test_encryption_without_a_key_raises() -> None:
-    from agentic_core.config import configure, reset_for_testing
-    from agentic_core.services.encryption import encrypt
-    from agentic_core.services.encryption import reset_for_testing as reset_encryption
+    from motoro.config import configure, reset_for_testing
+    from motoro.services.encryption import encrypt
+    from motoro.services.encryption import reset_for_testing as reset_encryption
 
     reset_for_testing()
     reset_encryption()
@@ -220,8 +220,8 @@ def test_encryption_without_a_key_raises() -> None:
 
 @needs_db
 async def test_register_server_connects_and_persists() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -239,9 +239,9 @@ async def test_register_server_connects_and_persists() -> None:
 
 
 def test_build_run_meta_includes_owner_id() -> None:
-    from agentic_core.engine.context import RunContext
-    from agentic_core.mcp.adapters import META_KEY_OWNER_ID, META_KEY_RUN_ID, META_KEY_WORKSPACE_ID, _build_run_meta
-    from agentic_core.schemas.agent import ModelConfig
+    from motoro.engine.context import RunContext
+    from motoro.mcp.adapters import META_KEY_OWNER_ID, META_KEY_RUN_ID, META_KEY_WORKSPACE_ID, _build_run_meta
+    from motoro.schemas.agent import ModelConfig
 
     owner = uuid.uuid4()
     run = uuid.uuid4()
@@ -267,9 +267,9 @@ def test_build_run_meta_includes_owner_id() -> None:
 
 
 def test_build_run_meta_includes_agent_name_and_model_only_together() -> None:
-    from agentic_core.engine.context import RunContext
-    from agentic_core.mcp.adapters import META_KEY_AGENT_NAME, META_KEY_MODEL, _build_run_meta
-    from agentic_core.schemas.agent import ModelConfig
+    from motoro.engine.context import RunContext
+    from motoro.mcp.adapters import META_KEY_AGENT_NAME, META_KEY_MODEL, _build_run_meta
+    from motoro.schemas.agent import ModelConfig
 
     with_name = RunContext(
         agent_goal="g",
@@ -296,15 +296,15 @@ async def test_call_tool_delivers_meta_verbatim() -> None:
     (e.g. asaree_workspace_core's META_KEY_WORKSPACE_ID) can silently drift
     from this without either side raising an error, which is exactly what
     happened before this test existed."""
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import register_server
 
     registry = MCPServerRegistry()
     name = f"echo-{uuid.uuid4().hex[:8]}"
     await _with_timeout(register_server(name=name, transport="stdio", command=_ECHO_COMMAND, registry=registry))
     try:
         client = registry.servers[name].client
-        sent_meta = {"agentic_core.workspace_id": "exp1/cellA", "agentic_core.owner_id": str(uuid.uuid4())}
+        sent_meta = {"motoro.workspace_id": "exp1/cellA", "motoro.owner_id": str(uuid.uuid4())}
         result = await _with_timeout(client.call_tool("echo_meta", {}, meta=sent_meta))
         assert not result.is_error
         import json
@@ -318,9 +318,9 @@ async def test_call_tool_delivers_meta_verbatim() -> None:
 
 @needs_db
 async def test_register_server_rejects_disallowed_command() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.security.mcp_command_allowlist import MCPCommandError
-    from agentic_core.services.mcp_service import register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.security.mcp_command_allowlist import MCPCommandError
+    from motoro.services.mcp_service import register_server
 
     registry = MCPServerRegistry()
     with pytest.raises(MCPCommandError):
@@ -331,9 +331,9 @@ async def test_register_server_rejects_disallowed_command() -> None:
 
 @needs_db
 async def test_register_server_rejects_private_url_by_default() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.security.ssrf_guard import SSRFError
-    from agentic_core.services.mcp_service import register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.security.ssrf_guard import SSRFError
+    from motoro.services.mcp_service import register_server
 
     registry = MCPServerRegistry()
     with pytest.raises(SSRFError):
@@ -342,8 +342,8 @@ async def test_register_server_rejects_private_url_by_default() -> None:
 
 @needs_db
 async def test_get_server_and_get_server_by_name() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import get_server, get_server_by_name, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import get_server, get_server_by_name, register_server
 
     registry = MCPServerRegistry()
     name = f"echo-{uuid.uuid4().hex[:8]}"
@@ -360,8 +360,8 @@ async def test_get_server_and_get_server_by_name() -> None:
 
 @needs_db
 async def test_list_servers_filters_by_owner() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import list_servers, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import list_servers, register_server
 
     registry = MCPServerRegistry()
     owner = uuid.uuid4()
@@ -391,8 +391,8 @@ async def test_list_servers_filters_by_owner() -> None:
 
 @needs_db
 async def test_register_server_is_system_and_list_servers_includes_it_for_any_owner() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import list_servers, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import list_servers, register_server
 
     registry = MCPServerRegistry()
     system_config = await _with_timeout(
@@ -417,8 +417,8 @@ async def test_register_server_is_system_and_list_servers_includes_it_for_any_ow
 
 @needs_db
 async def test_delete_server_unregisters_and_removes_row() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import delete_server, get_server, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import delete_server, get_server, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -434,8 +434,8 @@ async def test_delete_server_unregisters_and_removes_row() -> None:
 
 @needs_db
 async def test_refresh_server_rediscovers_tools() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import refresh_server, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import refresh_server, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -454,8 +454,8 @@ async def test_refresh_server_rediscovers_tools() -> None:
 @needs_db
 async def test_reconnect_server_after_manual_unregister() -> None:
     """Simulates a fresh process: the registry has forgotten the server, but the DB hasn't."""
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import reconnect_server, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import reconnect_server, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -476,8 +476,8 @@ async def test_reconnect_server_after_manual_unregister() -> None:
 
 @needs_db
 async def test_update_server_reconnects_with_new_settings() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import register_server, update_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import register_server, update_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -497,8 +497,8 @@ async def test_update_server_reconnects_with_new_settings() -> None:
 
 @needs_db
 async def test_call_server_tool_invokes_and_returns_content() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import call_server_tool, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import call_server_tool, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -516,8 +516,8 @@ async def test_call_server_tool_invokes_and_returns_content() -> None:
 
 @needs_db
 async def test_call_server_tool_raises_when_not_connected() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import call_server_tool, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import call_server_tool, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -532,8 +532,8 @@ async def test_call_server_tool_raises_when_not_connected() -> None:
 
 @needs_db
 async def test_reset_server_session_parses_json_payload() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import register_server, reset_server_session
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import register_server, reset_server_session
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -556,8 +556,8 @@ async def test_reset_server_session_parses_json_payload() -> None:
 @needs_db
 async def test_hydrate_registry_reconnects_from_the_table_alone() -> None:
     """A fresh, empty registry — a new process — rebuilds live connections from the DB."""
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import hydrate_registry, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import hydrate_registry, register_server
 
     original_registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -587,8 +587,8 @@ async def test_hydrate_registry_reconnects_from_the_table_alone() -> None:
 
 @needs_db
 async def test_hydrate_registry_is_a_no_op_for_already_live_servers() -> None:
-    from agentic_core.mcp.registry import MCPServerRegistry
-    from agentic_core.services.mcp_service import hydrate_registry, register_server
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import hydrate_registry, register_server
 
     registry = MCPServerRegistry()
     config = await _with_timeout(
@@ -614,7 +614,7 @@ async def test_hydrate_registry_is_a_no_op_for_already_live_servers() -> None:
 @needs_db
 async def test_live_connect_completes_within_a_bounded_timeout() -> None:
     """See the module docstring: mcp==2.0.0 hangs this forever. This must return."""
-    from agentic_core.mcp.client import MCPClient, TransportType
+    from motoro.mcp.client import MCPClient, TransportType
 
     client = MCPClient(name="regression-guard", transport=TransportType.STDIO, command=_ECHO_COMMAND)
     await _with_timeout(client.connect())

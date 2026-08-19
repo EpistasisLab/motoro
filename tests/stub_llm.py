@@ -20,7 +20,7 @@ from __future__ import annotations
 import uuid
 from typing import Any
 
-from agentic_core.schemas.llm import (
+from motoro.schemas.llm import (
     ActOutput,
     LLMCallRecord,
     PlanOutput,

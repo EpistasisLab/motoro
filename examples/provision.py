@@ -7,7 +7,7 @@ it. That is an admin action, a seed script, a CI task — never the request path
 Note what is *not* here: no session, no core models, no schema. Core owns its own
 database. The schema is applied separately, once, as a deploy step::
 
-    python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"
+    python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"
 
 Usage::
 
@@ -23,9 +23,9 @@ import asyncio
 
 from settings import Settings
 
-from agentic_core import configure
-from agentic_core.runner import create_agent, get_agent_by_name
-from agentic_core.schemas.agent import LLMProvider, ModelConfig
+from motoro import configure
+from motoro.runner import create_agent, get_agent_by_name
+from motoro.schemas.agent import LLMProvider, ModelConfig
 
 
 async def main() -> int:
@@ -53,13 +53,13 @@ async def main() -> int:
     provider = LLMProvider(args.provider)
     # No api_key here on purpose: it is `exclude=True`, so it would not survive
     # being persisted with the agent. Credentials resolve at call time from
-    # settings — see agentic_core.services.credentials.
+    # settings — see motoro.services.credentials.
     model_config = ModelConfig(provider=provider, model=args.model, max_tokens=2048)
 
     agent = await create_agent(
         name=name,
         goal=args.goal,
-        description="Example agent for the agentic-core smoke test.",
+        description="Example agent for the Motoro smoke test.",
         model_config=model_config,
         pattern_config={"execution_pattern": args.pattern},
     )

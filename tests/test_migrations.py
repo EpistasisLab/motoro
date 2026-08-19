@@ -22,7 +22,7 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
+from motoro import CoreSettings
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
 
@@ -81,7 +81,7 @@ async def _introspect(db_name: str, sql: str) -> list[str]:
 @pytest.fixture
 async def scratch_dbs() -> Any:
     """Two empty databases: one for create_all, one for the migration chain."""
-    names = ("agentic_core_t_createall", "agentic_core_t_migrated")
+    names = ("motoro_t_createall", "motoro_t_migrated")
     for n in names:
         await _admin(f'DROP DATABASE IF EXISTS "{n}"')
         await _admin(f'CREATE DATABASE "{n}"')
@@ -92,10 +92,10 @@ async def scratch_dbs() -> Any:
 
 async def test_migrated_schema_matches_create_all(scratch_dbs: tuple[str, str]) -> None:
     """The two provisioning paths agree, column for column and index for index."""
-    from agentic_core.config import configure, reset_for_testing
-    from agentic_core.migrations import upgrade_async
-    from agentic_core.models.database import dispose_engine
-    from agentic_core.runner import init_schema
+    from motoro.config import configure, reset_for_testing
+    from motoro.migrations import upgrade_async
+    from motoro.models.database import dispose_engine
+    from motoro.runner import init_schema
 
     ca_db, mig_db = scratch_dbs
 
@@ -124,12 +124,12 @@ async def test_migrated_schema_matches_create_all(scratch_dbs: tuple[str, str]) 
 
 
 async def test_chain_uses_its_own_version_table(scratch_dbs: tuple[str, str]) -> None:
-    """Core stamps ``alembic_version_agentic_core``, leaving ``alembic_version``
+    """Core stamps ``alembic_version_motoro``, leaving ``alembic_version``
     free for the product's chain."""
     from sqlalchemy import text
     from sqlalchemy.ext.asyncio import create_async_engine
 
-    from agentic_core.migrations import VERSION_TABLE, upgrade_async
+    from motoro.migrations import VERSION_TABLE, upgrade_async
 
     _, mig_db = scratch_dbs
     await upgrade_async(_url_for(mig_db))
@@ -146,7 +146,7 @@ async def test_chain_uses_its_own_version_table(scratch_dbs: tuple[str, str]) ->
 
 async def test_upgrade_is_idempotent(scratch_dbs: tuple[str, str]) -> None:
     """Running upgrade twice is a no-op, so a product may call it on every boot."""
-    from agentic_core.migrations import current_revision, upgrade_async
+    from motoro.migrations import current_revision, upgrade_async
 
     _, mig_db = scratch_dbs
     url = _url_for(mig_db)
@@ -169,7 +169,7 @@ async def test_chain_owns_only_core_tables() -> None:
     ``alembic.context.config`` at module scope and is therefore only importable
     while Alembic is actually running.
     """
-    from agentic_core.migrations import CORE_TABLES
+    from motoro.migrations import CORE_TABLES
 
     assert set(CORE_TABLES) == {
         "agents",
@@ -185,11 +185,11 @@ async def test_chain_owns_only_core_tables() -> None:
 def test_migration_scripts_are_present() -> None:
     """``env.py`` and at least one revision ship inside the package.
 
-    They live under ``src/agentic_core/migrations`` rather than at the repo root
+    They live under ``src/motoro/migrations`` rather than at the repo root
     precisely so a pip-installed core can still be migrated; if they stop being
     packaged, ``upgrade()`` has nothing to run.
     """
-    from agentic_core.migrations import MIGRATIONS_DIR
+    from motoro.migrations import MIGRATIONS_DIR
 
     assert (MIGRATIONS_DIR / "env.py").is_file()
     assert (MIGRATIONS_DIR / "script.py.mako").is_file()
@@ -201,7 +201,7 @@ def test_env_module_refuses_to_nest_event_loops() -> None:
     """``upgrade()`` is sync on purpose; ``upgrade_async`` exists for async callers."""
     import inspect
 
-    from agentic_core.migrations import upgrade, upgrade_async
+    from motoro.migrations import upgrade, upgrade_async
 
     assert not inspect.iscoroutinefunction(upgrade)
     assert inspect.iscoroutinefunction(upgrade_async)
@@ -230,7 +230,7 @@ async def test_downgrade_then_upgrade_reproduces_the_schema(scratch_dbs: tuple[s
     enum types, so the next upgrade died on ``type "pattern_category" already
     exists`` — a database that could be migrated once and never again.
     """
-    from agentic_core.migrations import current_revision, downgrade, upgrade_async
+    from motoro.migrations import current_revision, downgrade, upgrade_async
 
     _, db = scratch_dbs
     url = _url_for(db)
@@ -253,7 +253,7 @@ async def test_downgrade_then_upgrade_reproduces_the_schema(scratch_dbs: tuple[s
 
 async def test_downgrade_leaves_no_orphan_enum_types(scratch_dbs: tuple[str, str]) -> None:
     """Types are schema too. A left-behind enum blocks the next upgrade."""
-    from agentic_core.migrations import downgrade, upgrade_async
+    from motoro.migrations import downgrade, upgrade_async
 
     _, db = scratch_dbs
     url = _url_for(db)
@@ -276,7 +276,7 @@ def test_every_revision_drops_the_enums_it_creates() -> None:
     import re
     from pathlib import Path
 
-    import agentic_core.migrations as m
+    import motoro.migrations as m
 
     versions = Path(m.__file__).parent / "versions"
     offenders: list[str] = []
@@ -311,7 +311,7 @@ def test_no_revision_uses_non_transactional_ddl() -> None:
     """
     from pathlib import Path
 
-    import agentic_core.migrations as m
+    import motoro.migrations as m
 
     versions = Path(m.__file__).parent / "versions"
     offenders = [

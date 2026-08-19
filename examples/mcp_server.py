@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """A tiny stdio MCP server for the example below — one tool, deterministic.
 
-Not part of ``agentic_core`` — a product supplies its own MCP servers; this one
+Not part of ``motoro`` — a product supplies its own MCP servers; this one
 exists only so ``mcp_run.py`` has something real to register and call. The tool
 returns a fact the model cannot know or guess, so a correct answer in the run's
 output is unambiguous proof the tool actually ran, rather than the model just

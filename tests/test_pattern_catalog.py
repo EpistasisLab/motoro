@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
+from motoro import CoreSettings
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
 needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
@@ -34,7 +34,7 @@ class _Settings(CoreSettings):
 @pytest.fixture(scope="module", autouse=True)
 def _configure() -> None:
     """Point core at the test database. Harmless for the registry-only tests."""
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     if not DB_URL:
         return
@@ -47,7 +47,7 @@ async def _dispose_engine() -> Any:
     """asyncpg connections belong to the loop that opened them, one loop per test."""
     yield
     if DB_URL:
-        from agentic_core.models.database import dispose_engine
+        from motoro.models.database import dispose_engine
 
         await dispose_engine()
 
@@ -59,8 +59,8 @@ async def _dispose_engine() -> Any:
 
 def test_every_registered_plugin_declares_catalog_metadata() -> None:
     """A pattern with no name or description would sync a useless catalog row."""
-    from agentic_core.engine.patterns.catalog import display_name_for
-    from agentic_core.engine.patterns.registry import PluginRegistry
+    from motoro.engine.patterns.catalog import display_name_for
+    from motoro.engine.patterns.registry import PluginRegistry
 
     PluginRegistry.discover()
     plugins = PluginRegistry.all()
@@ -85,7 +85,7 @@ def test_declared_dependencies_name_real_patterns() -> None:
     seeded rows kept pointing at the old slug. Declared on the class, a rename
     that misses this is a test failure rather than a stale row.
     """
-    from agentic_core.engine.patterns.registry import PluginRegistry
+    from motoro.engine.patterns.registry import PluginRegistry
 
     PluginRegistry.discover()
     plugins = PluginRegistry.all()
@@ -100,8 +100,8 @@ def test_configuration_schema_defaults_match_configure_fallbacks() -> None:
     what a product renders and what gets merged into params, while the fallback is
     what runs if the merge did not happen. They must agree.
     """
-    from agentic_core.engine.patterns.catalog import schema_defaults
-    from agentic_core.engine.patterns.registry import PluginRegistry
+    from motoro.engine.patterns.catalog import schema_defaults
+    from motoro.engine.patterns.registry import PluginRegistry
 
     PluginRegistry.discover()
 
@@ -122,8 +122,8 @@ def test_configuration_schema_defaults_match_configure_fallbacks() -> None:
 
 def test_schema_defaults_are_applied_to_plugin_params() -> None:
     """A plugin configured with nothing still sees its schema defaults."""
-    from agentic_core.engine.patterns.catalog import merge_schema_defaults
-    from agentic_core.engine.patterns.registry import PluginRegistry
+    from motoro.engine.patterns.catalog import merge_schema_defaults
+    from motoro.engine.patterns.registry import PluginRegistry
 
     PluginRegistry.discover()
     cls = PluginRegistry.get("reason_act")
@@ -138,7 +138,7 @@ def test_schema_defaults_are_applied_to_plugin_params() -> None:
 
 def test_schema_defaults_skip_required_properties() -> None:
     """A required property has no implicit default; supplying one hides the error."""
-    from agentic_core.engine.patterns.catalog import schema_defaults
+    from motoro.engine.patterns.catalog import schema_defaults
 
     schema = {
         "properties": {"role": {"type": "string", "default": "worker"}, "n": {"type": "integer", "default": 1}},
@@ -153,7 +153,7 @@ def test_schema_defaults_skip_required_properties() -> None:
 
 
 def test_validation_accepts_the_shipped_patterns() -> None:
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     for slug in ("single_agent_baseline", "reason_act"):
         result = validate_pattern_config({"execution_pattern": slug})
@@ -161,7 +161,7 @@ def test_validation_accepts_the_shipped_patterns() -> None:
 
 
 def test_validation_rejects_an_unknown_slug_and_names_the_field() -> None:
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     result = validate_pattern_config({"execution_pattern": "reasson_act"})
     assert not result.valid
@@ -172,7 +172,7 @@ def test_validation_rejects_an_unknown_slug_and_names_the_field() -> None:
 
 
 def test_validation_rejects_bad_params_via_the_plugins_own_validator() -> None:
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     result = validate_pattern_config(
         {"execution_pattern": "reason_act", "pattern_params": {"reason_act": {"max_iterations": -1}}}
@@ -183,7 +183,7 @@ def test_validation_rejects_bad_params_via_the_plugins_own_validator() -> None:
 
 def test_validation_rejects_params_for_an_inactive_pattern() -> None:
     """Otherwise a params block for the wrong slug is silently ignored."""
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     result = validate_pattern_config(
         {"execution_pattern": "reason_act", "pattern_params": {"single_agent_baseline": {"max_iterations": 5}}}
@@ -200,14 +200,14 @@ def test_validation_allows_a_same_category_singleton_dependency() -> None:
     if the composition helpers are called without category metadata for the
     *dependency* as well as the dependent.
     """
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     result = validate_pattern_config({"execution_pattern": "reason_act"})
     assert result.valid, [e.message for e in result.errors]
 
 
 def test_empty_config_is_valid() -> None:
-    from agentic_core.engine.patterns.catalog import validate_pattern_config
+    from motoro.engine.patterns.catalog import validate_pattern_config
 
     assert validate_pattern_config(None).valid
     assert validate_pattern_config({}).valid
@@ -216,8 +216,8 @@ def test_empty_config_is_valid() -> None:
 @needs_db
 async def test_create_agent_rejects_an_unknown_pattern() -> None:
     """The gate is at creation, before a run exists and a model is billed."""
-    from agentic_core.engine.patterns.catalog import PatternConfigError
-    from agentic_core.runner import create_agent, get_agent_by_name
+    from motoro.engine.patterns.catalog import PatternConfigError
+    from motoro.runner import create_agent, get_agent_by_name
 
     name = f"test-badpattern-{uuid.uuid4().hex[:8]}"
     with pytest.raises(PatternConfigError, match="Unknown pattern slug"):
@@ -229,7 +229,7 @@ async def test_create_agent_rejects_an_unknown_pattern() -> None:
 
 @needs_db
 async def test_create_agent_accepts_a_valid_pattern() -> None:
-    from agentic_core.runner import create_agent
+    from motoro.runner import create_agent
 
     agent = await create_agent(
         name=f"test-goodpattern-{uuid.uuid4().hex[:8]}",
@@ -244,7 +244,7 @@ async def test_agent_names_are_unique_per_owner_not_installation() -> None:
     """uq_agents_owner_name_active scopes the constraint to (owner_id, lower(name))."""
     from sqlalchemy.exc import IntegrityError
 
-    from agentic_core.runner import create_agent, get_agent_by_name
+    from motoro.runner import create_agent, get_agent_by_name
 
     name = f"test-perowner-{uuid.uuid4().hex[:8]}"
     owner_a, owner_b = uuid.uuid4(), uuid.uuid4()
@@ -268,7 +268,7 @@ async def test_agent_names_are_unique_per_owner_not_installation() -> None:
 
 
 def test_catalog_rows_come_from_the_plugin_classes() -> None:
-    from agentic_core.services.pattern_catalog import catalog_rows
+    from motoro.services.pattern_catalog import catalog_rows
 
     rows = {r["slug"]: r for r in catalog_rows()}
     assert set(rows) == {"single_agent_baseline", "reason_act"}
@@ -291,10 +291,10 @@ async def test_sync_is_idempotent_and_corrects_a_drifted_row() -> None:
     """
     from sqlalchemy import select, update
 
-    from agentic_core.models.database import system_session
-    from agentic_core.models.pattern import ArchitecturalPattern
-    from agentic_core.runner import init_schema
-    from agentic_core.services.pattern_catalog import sync_pattern_catalog
+    from motoro.models.database import system_session
+    from motoro.models.pattern import ArchitecturalPattern
+    from motoro.runner import init_schema
+    from motoro.services.pattern_catalog import sync_pattern_catalog
 
     await init_schema(drop_first=True)
 
@@ -333,9 +333,9 @@ async def test_core_runs_against_an_empty_catalog() -> None:
     """
     from sqlalchemy import delete
 
-    from agentic_core.models.database import system_session
-    from agentic_core.models.pattern import ArchitecturalPattern
-    from agentic_core.runner import create_agent, init_schema
+    from motoro.models.database import system_session
+    from motoro.models.pattern import ArchitecturalPattern
+    from motoro.runner import create_agent, init_schema
 
     await init_schema(drop_first=True)
     async with system_session(reason="test_empty_catalog") as db:
@@ -353,8 +353,8 @@ async def test_core_runs_against_an_empty_catalog() -> None:
 @needs_db
 async def test_list_catalog_reads_the_projection() -> None:
     """The one API a product needs for this table — no session on its side."""
-    from agentic_core.runner import init_schema
-    from agentic_core.services.pattern_catalog import list_catalog, sync_pattern_catalog
+    from motoro.runner import init_schema
+    from motoro.services.pattern_catalog import list_catalog, sync_pattern_catalog
 
     await init_schema(drop_first=True)
     await sync_pattern_catalog()

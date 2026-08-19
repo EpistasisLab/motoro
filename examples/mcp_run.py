@@ -30,11 +30,11 @@ from typing import Any
 
 from settings import Settings
 
-from agentic_core import configure
-from agentic_core.mcp.registry import MCPServerRegistry
-from agentic_core.runner import create_agent, create_run, execute_run, get_agent_by_name, get_run_steps
-from agentic_core.schemas.agent import LLMProvider, ModelConfig
-from agentic_core.services.mcp_service import get_server_by_name, hydrate_registry, register_server
+from motoro import configure
+from motoro.mcp.registry import MCPServerRegistry
+from motoro.runner import create_agent, create_run, execute_run, get_agent_by_name, get_run_steps
+from motoro.schemas.agent import LLMProvider, ModelConfig
+from motoro.services.mcp_service import get_server_by_name, hydrate_registry, register_server
 
 _AGENT_NAME = "example-mcp-tools"
 _SERVER_NAME = "example-tools"
@@ -64,7 +64,7 @@ async def _hydrated_registry() -> MCPServerRegistry:
     """
     registry = MCPServerRegistry()
     # Explicit registry= on every call — the default is the process-global
-    # singleton (agentic_core.mcp.registry.get_registry()), and this example
+    # singleton (motoro.mcp.registry.get_registry()), and this example
     # manages its own connection lifecycle end to end, so nothing should touch
     # that singleton or leave a second, undisconnected client behind it.
     if await get_server_by_name(_SERVER_NAME) is None:

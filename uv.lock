@@ -13,7 +13,7 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "agentic-core"
+name = "motoro"
 version = "0.0.1"
 source = { editable = "." }
 dependencies = [

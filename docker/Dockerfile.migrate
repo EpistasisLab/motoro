@@ -39,7 +39,7 @@ RUN pip install --no-cache-dir .
 # .dockerignore keeps it out of the build context so it cannot be copied by
 # accident.
 
-ENTRYPOINT ["python", "-m", "agentic_core.migrations"]
+ENTRYPOINT ["python", "-m", "motoro.migrations"]
 # `deploy`, not `upgrade`: preparing core's database means the schema *and* the
 # catalog projection, which must run after the schema exists.
 CMD ["deploy"]

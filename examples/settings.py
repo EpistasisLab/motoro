@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
+from motoro import CoreSettings
 
 
 class Settings(CoreSettings):

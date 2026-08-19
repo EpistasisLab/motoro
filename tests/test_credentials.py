@@ -13,9 +13,9 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
-from agentic_core.schemas.agent import LLMProvider, ModelConfig
-from agentic_core.services.credentials import (
+from motoro import CoreSettings
+from motoro.schemas.agent import LLMProvider, ModelConfig
+from motoro.services.credentials import (
     disable_credential_resolution,
     env_credential_resolver,
     foundry_api_base,
@@ -45,7 +45,7 @@ _PROVIDER_ENV = (
 
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
-    from agentic_core.config import reset_for_testing
+    from motoro.config import reset_for_testing
 
     for name in _PROVIDER_ENV:
         monkeypatch.delenv(name, raising=False)
@@ -57,7 +57,7 @@ def _clean(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 def _configure(**kw: Any) -> None:
-    from agentic_core.config import configure
+    from motoro.config import configure
 
     configure(_Settings(**kw))
 

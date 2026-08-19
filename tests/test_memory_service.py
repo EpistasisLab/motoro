@@ -28,7 +28,7 @@ from typing import Any
 import pytest
 from pydantic_settings import SettingsConfigDict
 
-from agentic_core import CoreSettings
+from motoro import CoreSettings
 
 DB_URL = os.environ.get("AGENTIC_TEST_DATABASE_URL", "")
 needs_db = pytest.mark.skipif(not DB_URL, reason="AGENTIC_TEST_DATABASE_URL is not set")
@@ -40,7 +40,7 @@ class _Settings(CoreSettings):
 
 @pytest.fixture(scope="module", autouse=True)
 def _configure() -> None:
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     if not DB_URL:
         return
@@ -54,8 +54,8 @@ async def _schema() -> Any:
     if not DB_URL:
         yield
         return
-    from agentic_core.models.database import dispose_engine
-    from agentic_core.runner import init_schema
+    from motoro.models.database import dispose_engine
+    from motoro.runner import init_schema
 
     await init_schema(drop_first=True)
     yield
@@ -68,7 +68,7 @@ async def _schema() -> Any:
 
 
 def test_embedding_provider_mapping() -> None:
-    from agentic_core.memory.embedding import _embedding_provider
+    from motoro.memory.embedding import _embedding_provider
 
     assert _embedding_provider("text-embedding-3-small") == "openai"
     assert _embedding_provider("openai/text-embedding-3-large") == "openai"
@@ -77,7 +77,7 @@ def test_embedding_provider_mapping() -> None:
 
 
 async def test_explicit_api_key_takes_precedence() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
+    from motoro.memory.embedding import EmbeddingService
 
     svc = EmbeddingService(model="text-embedding-3-small", api_key="sk-explicit")
     assert await svc._resolve_api_key() == "sk-explicit"
@@ -86,11 +86,11 @@ async def test_explicit_api_key_takes_precedence() -> None:
 def _reconfigure(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch, **kw: Any) -> None:
     """Reset and reinstall settings for a single test, restoring afterward.
 
-    ``settings`` is a lazy proxy (see ``agentic_core.config``), so
+    ``settings`` is a lazy proxy (see ``motoro.config``), so
     ``monkeypatch.setattr(settings, ...)`` cannot patch a field directly — the
     product-facing path is always reset + reconfigure with a real instance.
     """
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     class _Local(CoreSettings):
         model_config = SettingsConfigDict(env_prefix="AGENTIC_TEST_LOCAL_", extra="ignore", populate_by_name=True)
@@ -102,7 +102,7 @@ def _reconfigure(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 
 
 def _restore_module_settings() -> None:
-    from agentic_core.config import configure, reset_for_testing
+    from motoro.config import configure, reset_for_testing
 
     reset_for_testing()
     if DB_URL:
@@ -115,7 +115,7 @@ async def test_resolves_key_from_settings_not_a_user_table(
     """No ``user_id`` parameter exists at all — there is no per-user table to join."""
     import inspect
 
-    from agentic_core.memory.embedding import EmbeddingService
+    from motoro.memory.embedding import EmbeddingService
 
     assert "user_id" not in inspect.signature(EmbeddingService.__init__).parameters
 
@@ -127,7 +127,7 @@ async def test_resolves_key_from_settings_not_a_user_table(
 async def test_no_key_configured_resolves_to_none(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from agentic_core.memory.embedding import EmbeddingService
+    from motoro.memory.embedding import EmbeddingService
 
     _reconfigure(request, monkeypatch)
     svc = EmbeddingService(model="text-embedding-3-small")
@@ -136,7 +136,7 @@ async def test_no_key_configured_resolves_to_none(
 
 async def test_local_model_never_resolves_a_key() -> None:
     """The default backend needs no credential at all."""
-    from agentic_core.memory.embedding import EmbeddingService
+    from motoro.memory.embedding import EmbeddingService
 
     svc = EmbeddingService(model="sentence-transformers/all-MiniLM-L6-v2")
     assert await svc._resolve_api_key() is None
@@ -148,7 +148,7 @@ async def test_local_model_never_resolves_a_key() -> None:
 
 
 def test_memory_entry_has_no_owner_column() -> None:
-    from agentic_core.models.memory import MemoryEntry
+    from motoro.models.memory import MemoryEntry
 
     columns = {c.name for c in MemoryEntry.__table__.columns}
     assert "created_by_id" not in columns
@@ -166,21 +166,21 @@ def test_memory_entry_has_no_owner_column() -> None:
 
 
 async def _make_agent() -> Any:
-    from agentic_core.runner import create_agent
+    from motoro.runner import create_agent
 
     return await create_agent(name=f"test-memory-{uuid.uuid4().hex[:8]}", goal="x")
 
 
 async def _make_run(agent_id: uuid.UUID) -> Any:
-    from agentic_core.runner import create_run
+    from motoro.runner import create_run
 
     return await create_run(agent_id=agent_id, user_input="x")
 
 
 @needs_db
 async def test_semantic_store_and_search_round_trip() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
-    from agentic_core.memory.semantic import SemanticMemoryStore
+    from motoro.memory.embedding import EmbeddingService
+    from motoro.memory.semantic import SemanticMemoryStore
 
     embed = EmbeddingService()
     store = SemanticMemoryStore(embed)
@@ -200,8 +200,8 @@ async def test_semantic_store_and_search_round_trip() -> None:
 
 @needs_db
 async def test_semantic_search_requires_agent_id_for_agent_scope() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
-    from agentic_core.memory.semantic import SemanticMemoryStore
+    from motoro.memory.embedding import EmbeddingService
+    from motoro.memory.semantic import SemanticMemoryStore
 
     store = SemanticMemoryStore(EmbeddingService())
     with pytest.raises(ValueError, match="requires a non-None agent_id"):
@@ -210,8 +210,8 @@ async def test_semantic_search_requires_agent_id_for_agent_scope() -> None:
 
 @needs_db
 async def test_semantic_global_scope_excludes_agent_rows() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
-    from agentic_core.memory.semantic import SemanticMemoryStore
+    from motoro.memory.embedding import EmbeddingService
+    from motoro.memory.semantic import SemanticMemoryStore
 
     embed = EmbeddingService()
     store = SemanticMemoryStore(embed)
@@ -227,8 +227,8 @@ async def test_semantic_global_scope_excludes_agent_rows() -> None:
 
 @needs_db
 async def test_episodic_store_and_get_recent() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
-    from agentic_core.memory.episodic import EpisodicMemoryStore
+    from motoro.memory.embedding import EmbeddingService
+    from motoro.memory.episodic import EpisodicMemoryStore
     from tests.stub_llm import StubLLM
 
     embed = EmbeddingService()
@@ -247,9 +247,9 @@ async def test_episodic_store_and_get_recent() -> None:
 
 @needs_db
 async def test_forget_deletes_either_memory_type() -> None:
-    from agentic_core.memory.embedding import EmbeddingService
-    from agentic_core.memory.episodic import EpisodicMemoryStore
-    from agentic_core.memory.semantic import SemanticMemoryStore
+    from motoro.memory.embedding import EmbeddingService
+    from motoro.memory.episodic import EpisodicMemoryStore
+    from motoro.memory.semantic import SemanticMemoryStore
     from tests.stub_llm import StubLLM
 
     embed = EmbeddingService()
@@ -273,8 +273,8 @@ async def test_forget_deletes_either_memory_type() -> None:
 
 @needs_db
 async def test_memory_service_conforms_to_the_port() -> None:
-    from agentic_core.engine.ports import MemoryServicePort
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.engine.ports import MemoryServicePort
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     svc = MemoryService(llm_service=StubLLM())
@@ -283,8 +283,8 @@ async def test_memory_service_conforms_to_the_port() -> None:
 
 @needs_db
 async def test_remember_dispatches_by_memory_type() -> None:
-    from agentic_core.models.memory import MemoryType
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.models.memory import MemoryType
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     svc = MemoryService(llm_service=StubLLM())
@@ -305,7 +305,7 @@ async def test_remember_dispatches_by_memory_type() -> None:
 
 @needs_db
 async def test_recall_combines_and_ranks_both_types() -> None:
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     svc = MemoryService(llm_service=StubLLM())
@@ -326,8 +326,8 @@ async def test_recall_combines_and_ranks_both_types() -> None:
 @needs_db
 async def test_recall_falls_back_to_recency_when_nothing_matches() -> None:
     """No embeddings exist for this agent at all -> recency fallback, not an empty list."""
-    from agentic_core.models.memory import MemoryType
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.models.memory import MemoryType
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     svc = MemoryService(llm_service=StubLLM())
@@ -356,9 +356,9 @@ async def test_run_with_no_owner_still_stores_episodic_memory() -> None:
     (owner_id=None, the default) must still produce an episodic entry once
     episodic memory is enabled.
     """
-    from agentic_core.runner import create_agent, create_run, execute_run
-    from agentic_core.schemas.agent import LLMProvider, ModelConfig
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.runner import create_agent, create_run, execute_run
+    from motoro.schemas.agent import LLMProvider, ModelConfig
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     stub = StubLLM()
@@ -394,9 +394,9 @@ async def test_a_second_run_actually_recalls_the_first_runs_memory() -> None:
     regression test for that: a second run must report a nonzero
     ``memory_recalled_count``, not just leave a row behind.
     """
-    from agentic_core.runner import create_agent, create_run, execute_run
-    from agentic_core.schemas.agent import LLMProvider, ModelConfig
-    from agentic_core.services.memory_service import MemoryService
+    from motoro.runner import create_agent, create_run, execute_run
+    from motoro.schemas.agent import LLMProvider, ModelConfig
+    from motoro.services.memory_service import MemoryService
     from tests.stub_llm import StubLLM
 
     stub = StubLLM()

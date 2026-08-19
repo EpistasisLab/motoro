@@ -22,8 +22,8 @@ import uuid
 
 from settings import Settings
 
-from agentic_core import configure
-from agentic_core.runner import create_run, execute_run, get_agent, get_agent_by_name, get_run_steps
+from motoro import configure
+from motoro.runner import create_run, execute_run, get_agent, get_agent_by_name, get_run_steps
 
 
 async def main() -> int:

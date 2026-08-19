@@ -1,4 +1,4 @@
-"""agentic_core.mcp_servers.okf — no MCP transport needed: ``@mcp.tool()``
+"""motoro.mcp_servers.okf — no MCP transport needed: ``@mcp.tool()``
 returns the plain function unchanged, so every tool is called directly.
 
 Covers: path jailing, progressive-disclosure discovery, the attested-
@@ -18,9 +18,9 @@ from pathlib import Path
 
 import pytest
 
-from agentic_core.mcp_servers import okf
+from motoro.mcp_servers import okf
 
-_OKF_SERVER_MODULE = Path(__file__).parent.parent / "src" / "agentic_core" / "mcp_servers" / "okf.py"
+_OKF_SERVER_MODULE = Path(__file__).parent.parent / "src" / "motoro" / "mcp_servers" / "okf.py"
 _OKF_COMMAND = f"{sys.executable} {_OKF_SERVER_MODULE}"
 _LIVE_TIMEOUT = 15.0
 
@@ -286,7 +286,7 @@ async def test_live_transport_delivers_ambient_meta_to_actor_string(tmp_path):
     test_call_tool_delivers_meta_verbatim (test_mcp_service.py) -- a
     consumer's own reading of an ambient meta key can silently drift from
     what the sender actually delivers without either side erroring."""
-    from agentic_core.mcp.registry import MCPServerRegistry
+    from motoro.mcp.registry import MCPServerRegistry
 
     registry = MCPServerRegistry()
     name = f"okf-{uuid.uuid4().hex[:8]}"

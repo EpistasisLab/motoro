@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Pull modules from the ARES tree into agentic-core, rewriting imports.
+"""Pull modules from the ARES tree into Motoro, rewriting imports.
 
 Usage:
     python scripts/pull_from_ares.py config models.base observability.metrics
@@ -7,8 +7,8 @@ Usage:
     python scripts/pull_from_ares.py --step 0                # a named slice step
 
 Each named module is copied from ``$ARES/backend/src/ares/<path>.py`` to
-``src/agentic_core/<path>.py`` with every ``ares.`` import rewritten to
-``agentic_core.``. Package ``__init__.py`` files are created as needed.
+``src/motoro/<path>.py`` with every ``ares.`` import rewritten to
+``motoro.``. Package ``__init__.py`` files are created as needed.
 
 The script is deliberately dumb about *what* to move — the dependency ordering
 lives in SLICES below, and the decision of what belongs in core is a human one.
@@ -28,7 +28,7 @@ import sys
 from pathlib import Path
 
 ARES = Path(os.environ.get("ARES_SRC", Path.home() / "dev/ARES/backend/src/ares"))
-DEST = Path(__file__).resolve().parent.parent / "src/agentic_core"
+DEST = Path(__file__).resolve().parent.parent / "src/motoro"
 
 # Dependency-ordered slices. Step N may only depend on steps < N.
 #
@@ -128,8 +128,8 @@ BARE_IMPORT_RE = re.compile(r"^(\s*)import ares\b", re.MULTILINE)
 
 
 def rewrite(text: str) -> str:
-    text = BARE_IMPORT_RE.sub(r"\1import agentic_core", text)
-    return IMPORT_RE.sub("agentic_core.", text)
+    text = BARE_IMPORT_RE.sub(r"\1import motoro", text)
+    return IMPORT_RE.sub("motoro.", text)
 
 
 def src_path(mod: str) -> Path:
@@ -156,12 +156,12 @@ def internal_deps(text: str) -> set[str]:
     except SyntaxError:
         return deps
     for node in ast.walk(tree):
-        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("agentic_core"):
-            deps.add(node.module[len("agentic_core.") :] or "")
+        if isinstance(node, ast.ImportFrom) and node.module and node.module.startswith("motoro"):
+            deps.add(node.module[len("motoro.") :] or "")
         elif isinstance(node, ast.Import):
             for a in node.names:
-                if a.name.startswith("agentic_core."):
-                    deps.add(a.name[len("agentic_core.") :])
+                if a.name.startswith("motoro."):
+                    deps.add(a.name[len("motoro.") :])
     return {d for d in deps if d}
 
 
@@ -218,7 +218,7 @@ def docstring_lines(text: str) -> set[int]:
 
 
 def verify() -> int:
-    """Check what is on disk in agentic_core, not what ARES would produce.
+    """Check what is on disk in Motoro, not what ARES would produce.
 
     Two invariants, both of which must hold after every step:
       1. No module still references ``ares`` — including in strings, defaults and

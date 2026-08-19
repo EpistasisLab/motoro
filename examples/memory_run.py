@@ -36,11 +36,11 @@ from typing import Any
 
 from settings import Settings
 
-from agentic_core import configure
-from agentic_core.runner import create_agent, create_run, execute_run, get_agent_by_name
-from agentic_core.schemas.agent import LLMProvider, ModelConfig
-from agentic_core.services.llm_service import LLMService
-from agentic_core.services.memory_service import MemoryService
+from motoro import configure
+from motoro.runner import create_agent, create_run, execute_run, get_agent_by_name
+from motoro.schemas.agent import LLMProvider, ModelConfig
+from motoro.services.llm_service import LLMService
+from motoro.services.memory_service import MemoryService
 
 _AGENT_NAME = "example-episodic-memory"
 
@@ -60,7 +60,7 @@ async def _provision() -> Any:
         goal="Answer the user's question, remembering what they have told you before.",
         model_config=ModelConfig(provider=LLMProvider.AZURE_FOUNDRY, model="claude-sonnet-5"),
         pattern_config={"execution_pattern": "single_agent_baseline"},
-        # Off by default (see agentic_core.schemas.agent.MemoryConfig) — a
+        # Off by default (see motoro.schemas.agent.MemoryConfig) — a
         # product opts an agent in explicitly, same field ARES used.
         memory_config={"episodic_memory_enabled": True},
     )

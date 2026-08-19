@@ -1,4 +1,4 @@
-# The backing services agentic-core requires, for local development.
+# The backing services Motoro requires, for local development.
 #
 # Core needs both of these to function — they are a requirement, not a
 # convenience. What is *not* core's concern is whose server they run on: a
@@ -6,14 +6,14 @@
 # being developed and tested.
 #
 # So the division is:
-#   core     owns the schema (src/agentic_core/migrations) and the Redis key
+#   core     owns the schema (src/motoro/migrations) and the Redis key
 #            layout, and requires that both be present
 #   product  owns the servers, the credentials, and the deployment
 #
 # Core is a headless library — no FastAPI app, no worker entrypoint — so there is
 # nothing here to run it *as*. If a `backend:` or `api:` service ever appears in
 # this file, the boundary has slipped: that belongs to whichever product is
-# consuming core. `agentic-core-migrate` is not that: the schema *is* core's, so
+# consuming core. `motoro-migrate` is not that: the schema *is* core's, so
 # applying it is core's job. It runs once and exits; it does not serve anything.
 #
 # Ports are deliberately offset from the ARES stack (5452/6379/6380) and the
@@ -26,17 +26,17 @@
 services:
   # Service keys are namespaced, not generic. A product that merges or extends
   # this file must not find a bare `postgres:` here to collide with.
-  agentic-core-postgres:
+  motoro-postgres:
     # pgvector rather than plain postgres:16. Core does not need the extension
     # today — none of its five tables uses a Vector column — but semantic memory
     # will, and swapping the image later means recreating the volume. The image
     # is a strict superset, so this costs nothing now.
     image: pgvector/pgvector:pg16
-    container_name: agentic-core-postgres
+    container_name: motoro-postgres
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-agentic}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-agentic}
-      POSTGRES_DB: ${POSTGRES_DB:-agentic_core}
+      POSTGRES_DB: ${POSTGRES_DB:-motoro}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
@@ -46,7 +46,7 @@ services:
       # anything you want to keep.
       - ./docker/initdb:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentic} -d ${POSTGRES_DB:-agentic_core}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-agentic} -d ${POSTGRES_DB:-motoro}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -64,25 +64,25 @@ services:
   # It appears as `Exited (0)` in `docker compose ps`. That is success, not a
   # crashed service — hence `restart: "no"`, which stops Compose from treating a
   # completed job as something to revive.
-  agentic-core-migrate:
+  motoro-migrate:
     build:
       context: .
       dockerfile: docker/Dockerfile.migrate
-    container_name: agentic-core-migrate
+    container_name: motoro-migrate
     depends_on:
       # Not `service_started`: Postgres's entrypoint accepts connections briefly
       # while still running initdb, so starting on that signal races the creation
       # of the database being migrated.
-      agentic-core-postgres:
+      motoro-postgres:
         condition: service_healthy
     environment:
       # The service hostname and 5432 — the *container* network. 5453 is the host
       # port mapping and means nothing in here. Bare DATABASE_URL, because the
       # CLI configures a plain CoreSettings with no product prefix.
-      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentic}:${POSTGRES_PASSWORD:-agentic}@agentic-core-postgres:5432/${POSTGRES_DB:-agentic_core}
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-agentic}:${POSTGRES_PASSWORD:-agentic}@motoro-postgres:5432/${POSTGRES_DB:-motoro}
     restart: "no"
 
-  agentic-core-redis:
+  motoro-redis:
     # Required, with a graceful-degradation path rather than a hard failure:
     # AgentRuntime._create_working_memory pings Redis and logs "Redis unavailable
     # — running without working memory" if it cannot reach it. A run still
@@ -90,7 +90,7 @@ services:
     # not how core is meant to operate. Treat Redis as a service a product must
     # provide, the same as Postgres.
     image: redis:7-alpine
-    container_name: agentic-core-redis
+    container_name: motoro-redis
     ports:
       - "${REDIS_PORT:-6381}:6379"
     healthcheck:
@@ -102,4 +102,4 @@ services:
 
 volumes:
   postgres_data:
-    name: agentic_core_postgres_data
+    name: motoro_postgres_data

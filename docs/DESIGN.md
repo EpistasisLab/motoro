@@ -57,7 +57,7 @@ to refuse to serve against a schema that is behind,
 request, and not in the examples, because a feature developer should never
 have to think about core's schema.
 
-`agentic-core-migrate` is that deploy step, not an exception to it: a
+`motoro-migrate` is that deploy step, not an exception to it: a
 **one-shot init container** that waits for Postgres to be healthy, runs
 `deploy`, and exits 0. One container, running to completion, gating what
 follows — there is nothing to race. `docker compose up -d` therefore brings the
@@ -108,7 +108,7 @@ That means **two databases**, not one:
 | | Core's database | The product's database |
 |---|---|---|
 | Contains | agents, runs, steps, and core's own tables | the product's domain tables |
-| Schema applied by | `python -m agentic_core.migrations upgrade` | the product's own Alembic chain |
+| Schema applied by | `python -m motoro.migrations upgrade` | the product's own Alembic chain |
 | Reached through | core's function API only | the product's own sessions |
 
 So that products never need to query core's tables to read their own data
@@ -143,9 +143,9 @@ and no product can corrupt core's tables by writing them directly.
 
 Verified end to end from an empty database: migrate → provision → run.
 
-Core's chain lives **inside the package** (`src/agentic_core/migrations/`) so
+Core's chain lives **inside the package** (`src/motoro/migrations/`) so
 a pip-installed core can still be migrated, and stamps
-`alembic_version_agentic_core` rather than `alembic_version`. Both of those
+`alembic_version_motoro` rather than `alembic_version`. Both of those
 still matter even with separate databases: the version table name keeps a
 *co-located* deployment — the two chains pointed at one database, which core
 does not require but does not forbid — from stamping over each other, and
@@ -217,7 +217,7 @@ page, an advisor's knowledge base, an experiment designer choosing factors.
 Read it back with `list_catalog()` so a product needs no session of its own:
 
 ```python
-from agentic_core.services.pattern_catalog import list_catalog
+from motoro.services.pattern_catalog import list_catalog
 rows = await list_catalog(implemented_only=True)
 ```
 
@@ -236,8 +236,8 @@ by one `memory_entries` table with a pgvector `embedding` column, behind
 `MemoryService`:
 
 ```python
-from agentic_core.services.memory_service import MemoryService
-from agentic_core.services.llm_service import LLMService
+from motoro.services.memory_service import MemoryService
+from motoro.services.llm_service import LLMService
 
 memory_service = MemoryService(llm_service=LLMService())
 result = await execute_run(run_id=run.id, memory_service=memory_service)
@@ -289,7 +289,7 @@ before being kept.
 
 ## MCP: the client was already done; this adds persistence
 
-`agentic_core.mcp` (`client`, `registry`, `adapters`) is transport — connect,
+`motoro.mcp` (`client`, `registry`, `adapters`) is transport — connect,
 discover tools, call a tool — wired into the Act phase from the start. What
 was missing is the other half: remembering *which* servers a product uses, so
 a fresh process — a worker, a restarted API, a new script invocation —
@@ -297,7 +297,7 @@ doesn't have to re-register them by hand. That's `services.mcp_service` +
 `models.mcp_server.MCPServerConfig`.
 
 ```python
-from agentic_core.services.mcp_service import register_server, hydrate_registry
+from motoro.services.mcp_service import register_server, hydrate_registry
 
 # Once: connect and persist.
 config = await register_server(name="search", transport="stdio", command="npx -y some-search-server")
@@ -398,15 +398,15 @@ examples have their own database and Redis rather than borrowing a product's.
 **If a `backend:` or `api:` service ever appears in it, the boundary has
 slipped.**
 
-- **Services are named `agentic-core-postgres` / `agentic-core-redis` /
-  `agentic-core-migrate`**, not `postgres` / `redis`, so a product merging or
+- **Services are named `motoro-postgres` / `motoro-redis` /
+  `motoro-migrate`**, not `postgres` / `redis`, so a product merging or
   extending this file finds nothing generic to collide with.
-- **`agentic-core-migrate` is the one non-service service**: it applies core's
+- **`motoro-migrate` is the one non-service service**: it applies core's
   schema and exits. Core owns the schema, so applying it is core's job — that
   is not the same as core shipping an app. The invariant above still holds.
 - **Ports 5453 / 6381**, offset from Postgres/Redis's own defaults (5432/6379)
   so this can run alongside another local stack without colliding.
-- **Two databases**: `agentic_core` for development, `agentic_core_test` for
+- **Two databases**: `motoro` for development, `motoro_test` for
   the suite — which drops and recreates its schema per test, so it must not
   share a database with anything you want to keep. Created by
   `docker/initdb/01-test-database.sql` on first boot of an empty volume.

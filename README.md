@@ -1,4 +1,4 @@
-# agentic-core
+# Motoro
 
 A **headless agentic platform**: the Sense-Reason-Plan-Act runtime, the pattern
 engine, the LLM bridge, MCP integration, memory, and the persistence beneath
@@ -16,7 +16,7 @@ real bugs that shaped each of those decisions.
 ## Layout
 
 ```
-src/agentic_core/
+src/motoro/
   config.py           CoreSettings + configure() + the settings proxy
   runner.py           create_agent/create_run/execute_run/fail_run — the public lifecycle
   models/             SQLAlchemy models; models/base.py owns the shared Base
@@ -37,10 +37,10 @@ tests/
 
 ```toml
 [project]
-dependencies = ["agentic-core"]
+dependencies = ["motoro"]
 
 [tool.uv.sources]
-agentic-core = { git = "https://github.com/EpistasisLab/agentic-core.git", tag = "v0.1.0" }
+motoro = { git = "https://github.com/EpistasisLab/motoro.git", tag = "v0.2.0" }
 ```
 
 Pin by tag (semver, against core's public surface), not a raw commit SHA. To
@@ -49,7 +49,7 @@ work against it, then `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
 
 ```python
 from pydantic_settings import SettingsConfigDict
-from agentic_core import CoreSettings, configure
+from motoro import CoreSettings, configure
 
 class Settings(CoreSettings):
     model_config = SettingsConfigDict(env_prefix="ASAREE_", env_file=".env", extra="ignore")
@@ -72,8 +72,8 @@ integration shape; the `examples/` CLI walkthrough further down
 run.
 
 ```python
-from agentic_core.runner import create_agent, create_run, execute_run
-from agentic_core.mcp.registry import get_registry
+from motoro.runner import create_agent, create_run, execute_run
+from motoro.mcp.registry import get_registry
 
 # e.g. behind POST /agents — once; agents are durable resources
 agent = await create_agent(
@@ -93,7 +93,7 @@ in a worker) — calling both inline in the same request, like above, is just
 as valid; core has no opinion on which a product picks.
 
 ```python
-from agentic_core.runner import fail_run
+from motoro.runner import fail_run
 
 # e.g. a stale-run sweep keyed on AgentRun.last_heartbeat_at
 await fail_run(run_id=run.id, error="worker died mid-flight")
@@ -113,7 +113,7 @@ Core requires **PostgreSQL and Redis**. A product provisions both, points
 deploy step:
 
 ```bash
-python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"   # core's DB
+python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"   # core's DB
 alembic upgrade head                                                     # the product's own DB
 ```
 
@@ -133,7 +133,7 @@ These are bare-name conventional variables, not prefixed by the product's own
 settings prefix. A product with its own credential store installs a resolver:
 
 ```python
-from agentic_core.services.credentials import set_credential_resolver
+from motoro.services.credentials import set_credential_resolver
 set_credential_resolver(my_resolver)   # e.g. ASAREE reads a per-user settings table
 ```
 
@@ -143,7 +143,7 @@ Not every model accepts `temperature`. Adaptive-thinking models (Opus 4.7/4.8,
 Sonnet 5, Fable 5) 400 on an explicit `temperature` and are steered instead
 with an `effort` dial (`low | medium | high | xhigh | max`). `model_config`
 doesn't need to know which regime a model is in — the LLM bridge resolves it
-per call via `agentic_core.services.model_capabilities`, the single source of
+per call via `motoro.services.model_capabilities`, the single source of
 truth other products (and their own GUI/SDK) resolve against too.
 
 ### Timeouts
@@ -181,9 +181,9 @@ end with no HTTP app around it, not something a real product runs.
 
 ```bash
 # 1. DEPLOY STEP — once per release, before the app starts
-docker compose up -d                    # the agentic-core-migrate service does this
+docker compose up -d                    # the motoro-migrate service does this
 # ...or, without Compose:
-python -m agentic_core.migrations upgrade --url "$AGENTIC_DATABASE_URL"
+python -m motoro.migrations upgrade --url "$AGENTIC_DATABASE_URL"
 
 # 2. PROVISIONING — once; agents are durable resources
 python examples/provision.py            # prints the agent id; idempotent by name
