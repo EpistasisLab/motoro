@@ -68,6 +68,12 @@ services:
     build:
       context: .
       dockerfile: docker/Dockerfile.migrate
+      # The package version is derived from this repo's git tags at build time
+      # (hatch-vcs), so no wheel can be built without the git metadata. It
+      # arrives as its own named context rather than through the main one so
+      # .dockerignore can go on excluding .git/ — see Dockerfile.migrate.
+      additional_contexts:
+        gitdir: ./.git
     container_name: motoro-migrate
     depends_on:
       # Not `service_started`: Postgres's entrypoint accepts connections briefly

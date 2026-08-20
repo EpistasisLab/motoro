@@ -31,7 +31,27 @@ WORKDIR /app
 COPY pyproject.toml README.md ./
 COPY src/ ./src/
 
-RUN pip install --no-cache-dir .
+# The .git mount is what lets this build at all: pyproject.toml declares no
+# literal version, hatch-vcs derives it from the repo's tags, and it needs the
+# git metadata to do that.
+#
+# `from=gitdir` -- a *named* build context (compose.yml's `additional_contexts`)
+# rather than the main one -- for two reasons. It never lands in an image layer,
+# and .dockerignore can go on excluding .git/ from the main context, so no future
+# `COPY . .` here can bake the history into an image. Building this by hand
+# outside Compose therefore needs the context passed explicitly:
+#
+#   docker build -f docker/Dockerfile.migrate --build-context gitdir=./.git .
+#
+# git itself is a build-time dependency for the same reason (setuptools-scm
+# shells out to `git describe`, and python:3.13-slim ships without it), so it's
+# installed and removed inside this single RUN -- an init container that applies
+# a schema has no runtime use for it.
+RUN --mount=type=bind,from=gitdir,target=/app/.git \
+    apt-get update && apt-get install -y --no-install-recommends git \
+    && pip install --no-cache-dir . \
+    && apt-get purge -y --auto-remove git \
+    && rm -rf /var/lib/apt/lists/*
 
 # Note what is absent: the repo's .env. CoreSettings reads `env_file=".env"`, and
 # that file holds host-side URLs (localhost:5453) which are wrong inside the
