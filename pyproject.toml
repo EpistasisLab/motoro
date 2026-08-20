@@ -1,6 +1,11 @@
 [project]
 name = "motoro"
-version = "0.0.1"
+# Derived from the git tag by hatch-vcs (see [tool.hatch.version]), not written
+# here. Products pin this repo by tag, and the release procedure in README.md is
+# "land on main, then tag" -- it has no step that edits a version string, so a
+# hardcoded one drifted silently across five releases before this. The tag is
+# the release; let it be the version too.
+dynamic = ["version"]
 description = "Headless agentic platform: the Sense-Reason-Plan-Act runtime, pattern engine, MCP integration, and memory."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -78,8 +83,18 @@ dev = [
 ]
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+[tool.hatch.version]
+source = "vcs"
+
+# Generated at build time and shipped in the wheel, so an installed core can
+# report its own version without needing the git metadata it was built from.
+# Untracked (see .gitignore) -- it is a build artifact, and committing it would
+# reintroduce exactly the hand-maintained string this replaces.
+[tool.hatch.build.hooks.vcs]
+version-file = "src/motoro/_version.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/motoro"]

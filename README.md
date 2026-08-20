@@ -47,6 +47,10 @@ Pin by tag (semver, against core's public surface), not a raw commit SHA. To
 cut a new release: land the change on `main`, confirm dependent products still
 work against it, then `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
 
+That tag *is* the version: `hatch-vcs` derives both the package version and
+`motoro.__version__` from it at build time, so there is no version string to
+edit here and none to forget. Tagging is the whole procedure.
+
 ```python
 from pydantic_settings import SettingsConfigDict
 from motoro import CoreSettings, configure

@@ -13,81 +13,6 @@ resolution-markers = [
 ]
 
 [[package]]
-name = "motoro"
-version = "0.0.1"
-source = { editable = "." }
-dependencies = [
-    { name = "alembic" },
-    { name = "asyncpg" },
-    { name = "cryptography" },
-    { name = "filelock" },
-    { name = "httpx" },
-    { name = "instructor" },
-    { name = "jsonschema" },
-    { name = "litellm" },
-    { name = "mcp" },
-    { name = "opentelemetry-api" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc" },
-    { name = "opentelemetry-exporter-prometheus" },
-    { name = "opentelemetry-sdk" },
-    { name = "pgvector" },
-    { name = "pydantic" },
-    { name = "pydantic-settings" },
-    { name = "pyyaml" },
-    { name = "redis" },
-    { name = "sentence-transformers" },
-    { name = "sqlalchemy", extra = ["asyncio"] },
-    { name = "structlog" },
-    { name = "tenacity" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "import-linter" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "pytest-cov" },
-    { name = "ruff" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "alembic", specifier = ">=1.18.4" },
-    { name = "asyncpg", specifier = ">=0.30.0" },
-    { name = "cryptography", specifier = ">=43.0.0" },
-    { name = "filelock", specifier = ">=3.32.2" },
-    { name = "httpx", specifier = ">=0.28.1" },
-    { name = "instructor", specifier = ">=1.15.1" },
-    { name = "jsonschema", specifier = ">=4.26.0" },
-    { name = "litellm", specifier = ">=1.85.0" },
-    { name = "mcp", specifier = ">=1.27.1,<2.0.0" },
-    { name = "opentelemetry-api", specifier = ">=1.42.0" },
-    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.25.0" },
-    { name = "opentelemetry-exporter-prometheus", specifier = ">=0.62b1" },
-    { name = "opentelemetry-sdk", specifier = ">=1.41.1" },
-    { name = "pgvector", specifier = ">=0.3.6" },
-    { name = "pydantic", specifier = ">=2.10.0" },
-    { name = "pydantic-settings", specifier = ">=2.14.1" },
-    { name = "pyyaml", specifier = ">=6.0.3" },
-    { name = "redis", specifier = ">=5.2.0,<6" },
-    { name = "sentence-transformers", specifier = ">=5.4.1" },
-    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
-    { name = "structlog", specifier = ">=24.4.0" },
-    { name = "tenacity", specifier = ">=9.0.0" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "import-linter", specifier = ">=2.0" },
-    { name = "mypy", specifier = ">=2.1.0" },
-    { name = "pytest", specifier = ">=9.0.3" },
-    { name = "pytest-asyncio", specifier = ">=0.24.0" },
-    { name = "pytest-cov", specifier = ">=6.0.0" },
-    { name = "ruff", specifier = ">=0.15.15" },
-]
-
-[[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1553,6 +1478,80 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/d6/54/cfe61301667036ec958cb99bd3efefba235e65cdeb9c84d24a8293ba1d90/mdurl-0.1.2.tar.gz", hash = "sha256:bb413d29f5eea38f31dd4754dd7377d4465116fb207585f97bf925588687c1ba", size = 8729, upload-time = "2022-08-14T12:40:10.846Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b3/38/89ba8ad64ae25be8de66a6d463314cf1eb366222074cfda9ee839c56a4b4/mdurl-0.1.2-py3-none-any.whl", hash = "sha256:84008a41e51615a49fc9966191ff91509e3c40b939176e643fd50a5c2196b8f8", size = 9979, upload-time = "2022-08-14T12:40:09.779Z" },
+]
+
+[[package]]
+name = "motoro"
+source = { editable = "." }
+dependencies = [
+    { name = "alembic" },
+    { name = "asyncpg" },
+    { name = "cryptography" },
+    { name = "filelock" },
+    { name = "httpx" },
+    { name = "instructor" },
+    { name = "jsonschema" },
+    { name = "litellm" },
+    { name = "mcp" },
+    { name = "opentelemetry-api" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc" },
+    { name = "opentelemetry-exporter-prometheus" },
+    { name = "opentelemetry-sdk" },
+    { name = "pgvector" },
+    { name = "pydantic" },
+    { name = "pydantic-settings" },
+    { name = "pyyaml" },
+    { name = "redis" },
+    { name = "sentence-transformers" },
+    { name = "sqlalchemy", extra = ["asyncio"] },
+    { name = "structlog" },
+    { name = "tenacity" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "import-linter" },
+    { name = "mypy" },
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "pytest-cov" },
+    { name = "ruff" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "alembic", specifier = ">=1.18.4" },
+    { name = "asyncpg", specifier = ">=0.30.0" },
+    { name = "cryptography", specifier = ">=43.0.0" },
+    { name = "filelock", specifier = ">=3.32.2" },
+    { name = "httpx", specifier = ">=0.28.1" },
+    { name = "instructor", specifier = ">=1.15.1" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
+    { name = "litellm", specifier = ">=1.85.0" },
+    { name = "mcp", specifier = ">=1.27.1,<2.0.0" },
+    { name = "opentelemetry-api", specifier = ">=1.42.0" },
+    { name = "opentelemetry-exporter-otlp-proto-grpc", specifier = ">=1.25.0" },
+    { name = "opentelemetry-exporter-prometheus", specifier = ">=0.62b1" },
+    { name = "opentelemetry-sdk", specifier = ">=1.41.1" },
+    { name = "pgvector", specifier = ">=0.3.6" },
+    { name = "pydantic", specifier = ">=2.10.0" },
+    { name = "pydantic-settings", specifier = ">=2.14.1" },
+    { name = "pyyaml", specifier = ">=6.0.3" },
+    { name = "redis", specifier = ">=5.2.0,<6" },
+    { name = "sentence-transformers", specifier = ">=5.4.1" },
+    { name = "sqlalchemy", extras = ["asyncio"], specifier = ">=2.0.50" },
+    { name = "structlog", specifier = ">=24.4.0" },
+    { name = "tenacity", specifier = ">=9.0.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "import-linter", specifier = ">=2.0" },
+    { name = "mypy", specifier = ">=2.1.0" },
+    { name = "pytest", specifier = ">=9.0.3" },
+    { name = "pytest-asyncio", specifier = ">=0.24.0" },
+    { name = "pytest-cov", specifier = ">=6.0.0" },
+    { name = "ruff", specifier = ">=0.15.15" },
 ]
 
 [[package]]

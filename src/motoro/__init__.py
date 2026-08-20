@@ -25,4 +25,13 @@ from motoro.config import CoreSettings, configure, get_settings
 
 __all__ = ["CoreSettings", "configure", "get_settings"]
 
-__version__ = "0.0.1"
+try:
+    # Written by hatch-vcs at build time from the git tag, so an installed core
+    # reports the release it was cut from.
+    from motoro._version import __version__
+except ImportError:
+    # Imported straight out of a source tree that was never built (running the
+    # tests in this repo, most often). No tag is reachable from here, so say so
+    # rather than guessing a number that would go stale the same way the old
+    # hardcoded one did.
+    __version__ = "0.0.0+unknown"
