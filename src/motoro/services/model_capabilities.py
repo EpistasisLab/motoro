@@ -78,6 +78,25 @@ DEFAULT_CAPABILITIES = ModelCapabilities(
     default_effort=None,
 )
 
+# OpenAI's GPT-5 reasoning family. Effort-based like the Claude entries above, but
+# on a shorter ladder: OpenAI's ``reasoning_effort`` tops out at ``high`` (there is no
+# ``xhigh``/``max``), and its bottom rung ``minimal`` is omitted here because it falls
+# outside EFFORT_LEVELS_FULL, which effort_levels is contracted to be a subset of.
+#
+# ``supports_temperature=False`` is an approximation rather than a hard provider
+# constraint: unlike adaptive-thinking Claude, a GPT-5 model accepts temperature when
+# ``reasoning_effort`` is ``none``, so the dial is a property of the request mode as much
+# as of the model. Flattening it to effort is the honest default for a reasoning model —
+# and it's load-bearing, because _sampling_kwargs tests supports_temperature FIRST, so
+# leaving these on DEFAULT_CAPABILITIES means reasoning_effort is never sent at all and
+# any experiment factor bound to effort silently varies nothing.
+_OPENAI_REASONING = ModelCapabilities(
+    supports_temperature=False,
+    supports_effort=True,
+    effort_levels=["low", "medium", "high"],
+    default_effort=DEFAULT_EFFORT,
+)
+
 # Registry keyed by normalized (lowercase, provider-prefix-stripped) model id.
 # Substring matching covers date-suffixed / Foundry-deployed variants.
 _REGISTRY: dict[str, ModelCapabilities] = {
@@ -86,6 +105,13 @@ _REGISTRY: dict[str, ModelCapabilities] = {
     "claude-opus-4-7": _EFFORT_ONLY,
     "claude-fable-5": _EFFORT_ONLY,
     "claude-sonnet-5": _EFFORT_ONLY,
+    # Ordered BEFORE the "gpt-5" entries: gpt-5-chat is the non-reasoning
+    # sibling (temperature, no reasoning_effort), and it contains "gpt-5" as a
+    # substring, so the fallback loop below must reach it first.
+    "gpt-5-chat": DEFAULT_CAPABILITIES,
+    "gpt-5-mini": _OPENAI_REASONING,
+    "gpt-5-nano": _OPENAI_REASONING,
+    "gpt-5": _OPENAI_REASONING,
 }
 
 
@@ -138,6 +164,9 @@ CATALOG: list[ModelCatalogEntry] = [
     _entry("anthropic", "claude-fable-5", "Claude Fable 5"),
     _entry("anthropic", "claude-sonnet-5", "Claude Sonnet 5"),
     _entry("anthropic", "claude-haiku-4-5", "Claude Haiku 4.5"),
+    _entry("openai", "gpt-5", "GPT-5"),
+    _entry("openai", "gpt-5-mini", "GPT-5 Mini"),
+    _entry("openai", "gpt-5-nano", "GPT-5 Nano"),
     _entry("openai", "gpt-4o", "GPT-4o"),
     _entry("openai", "gpt-4o-mini", "GPT-4o Mini"),
 ]
