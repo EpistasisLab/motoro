@@ -18,6 +18,7 @@ class LLMProvider(enum.StrEnum):
     AZURE_FOUNDRY = "azure_foundry"
     BEDROCK = "bedrock"
     LOCAL = "local"
+    OPENROUTER = "openrouter"
 
 
 class MemoryConfig(BaseModel):

@@ -40,6 +40,9 @@ _PROVIDER_ENV = (
     "ANTHROPIC_FOUNDRY_API_KEY",
     "ANTHROPIC_FOUNDRY_RESOURCE",
     "AWS_REGION",
+    "OPENROUTER_API_KEY",
+    "LOCAL_LLM_API_BASE",
+    "LOCAL_LLM_API_KEY",
 )
 
 
@@ -119,6 +122,44 @@ async def test_foundry_key_without_resource_is_an_error() -> None:
     _configure(anthropic_foundry_api_key="fk", anthropic_foundry_resource="")
     with pytest.raises(ValueError, match="ANTHROPIC_FOUNDRY_RESOURCE"):
         await env_credential_resolver(ModelConfig(provider=LLMProvider.AZURE_FOUNDRY, model="m"))
+
+
+async def test_openrouter_resolves_key() -> None:
+    """OpenRouter needs no model-string override -- litellm's own `openrouter/`
+    route already matches the provider's enum value."""
+    _configure(openrouter_api_key="or-key")
+    model_config = ModelConfig(provider=LLMProvider.OPENROUTER, model="anthropic/claude-sonnet-5")
+    conn = await env_credential_resolver(model_config)
+    assert conn is not None
+    assert conn == {"model": None, "api_key": "or-key", "api_base": None, "api_version": None, "aws_region_name": None}
+
+
+async def test_local_resolves_model_prefix_and_placeholder_key_when_unset() -> None:
+    """A self-hosted server rarely checks the key, but litellm's OpenAI client
+    still requires a non-empty string."""
+    _configure(local_api_base="http://localhost:8000/v1")
+    conn = await env_credential_resolver(ModelConfig(provider=LLMProvider.LOCAL, model="llama-3-70b-instruct"))
+    assert conn == {
+        "model": "openai/llama-3-70b-instruct",
+        "api_key": "not-needed",
+        "api_base": "http://localhost:8000/v1",
+        "api_version": None,
+        "aws_region_name": None,
+    }
+
+
+async def test_local_uses_configured_key_when_set() -> None:
+    _configure(local_api_base="http://localhost:8000/v1", local_api_key="lk")
+    conn = await env_credential_resolver(ModelConfig(provider=LLMProvider.LOCAL, model="m"))
+    assert conn is not None
+    assert conn["api_key"] == "lk"
+
+
+async def test_local_abstains_without_a_base_url() -> None:
+    """There's no default host for a self-hosted server -- an explicit base is
+    required, unlike every other provider here."""
+    _configure()
+    assert await env_credential_resolver(ModelConfig(provider=LLMProvider.LOCAL, model="m")) is None
 
 
 async def test_resolver_abstains_when_no_credential_configured() -> None:

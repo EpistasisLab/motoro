@@ -146,6 +146,30 @@ async def env_credential_resolver(config: Any, principal_id: uuid.UUID | None = 
             return None
         return {"model": None, "api_key": key, "api_base": api_base, "api_version": None, "aws_region_name": None}
 
+    if provider == "openrouter":
+        key = settings.openrouter_api_key
+        if not key:
+            return None
+        return {"model": None, "api_key": key, "api_base": api_base, "api_version": None, "aws_region_name": None}
+
+    if provider == "local":
+        # No fixed default base URL (there's no one address a self-hosted
+        # server lives at) -- an explicit ANTHROPIC_FOUNDRY_RESOURCE-style
+        # requirement, except here it's the base itself rather than something
+        # a URL gets derived from.
+        base = api_base or settings.local_api_base
+        if not base:
+            return None
+        return {
+            "model": f"openai/{model}",
+            # Most self-hosted OpenAI-compatible servers don't check the key,
+            # but litellm's OpenAI client still requires a non-empty string.
+            "api_key": settings.local_api_key or "not-needed",
+            "api_base": base,
+            "api_version": None,
+            "aws_region_name": None,
+        }
+
     if provider == "bedrock":
         # litellm builds the bedrock/<model> string itself and reads the bearer
         # token from api_key; the region rides on aws_region_name.

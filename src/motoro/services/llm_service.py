@@ -27,7 +27,7 @@ from tenacity import (
 from motoro.config import settings
 from motoro.observability.metrics import record_llm_call
 from motoro.observability.tracing import get_tracer
-from motoro.schemas.agent import ModelConfig
+from motoro.schemas.agent import LLMProvider, ModelConfig
 from motoro.schemas.llm import LLMCallRecord, LLMToolCall, ToolCompletion
 from motoro.services.credential_scrubber import scrub as _scrub_creds
 from motoro.services.llm_errors import (
@@ -149,9 +149,24 @@ if _capture_usage_callback not in litellm.success_callback:
     litellm.success_callback = [_capture_usage_callback]
 
 
+# Providers whose real litellm routing prefix differs from their own enum
+# value. azure_foundry rides litellm's Azure AI Foundry inference route
+# (`azure_ai/`); local (a self-hosted OpenAI-compatible server, reached via a
+# required `api_base` override -- see services.credentials) rides litellm's
+# generic `openai/` provider since there's no dedicated "local" litellm
+# integration. Every other provider's litellm prefix IS its own enum value
+# (this is exactly true for openrouter -- litellm has a native `openrouter/`
+# route that takes OpenRouter's own `vendor/model` ids as-is).
+_LITELLM_PROVIDER_PREFIX: dict[LLMProvider, str] = {
+    LLMProvider.AZURE_FOUNDRY: "azure_ai",
+    LLMProvider.LOCAL: "openai",
+}
+
+
 def _build_model_string(config: ModelConfig) -> str:
     """Build litellm model string from config (e.g., 'anthropic/claude-sonnet-4-20250514')."""
-    return f"{config.provider.value}/{config.model}"
+    prefix = _LITELLM_PROVIDER_PREFIX.get(config.provider, config.provider.value)
+    return f"{prefix}/{config.model}"
 
 
 def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
@@ -190,7 +205,8 @@ def model_supports_tool_calling(config: ModelConfig) -> bool:
     """
     if not config.model:
         return False
-    model_str = f"azure_ai/{config.model}" if config.provider.value == "azure_foundry" else config.model
+    prefix = _LITELLM_PROVIDER_PREFIX.get(config.provider)
+    model_str = f"{prefix}/{config.model}" if prefix else config.model
     try:
         return bool(litellm.supports_function_calling(model_str))
     except Exception:  # noqa: BLE001 — an unrecognised model is a "no", not a crash
@@ -207,9 +223,11 @@ def _resolve_connection(config: ModelConfig) -> dict[str, str | None]:
     ``api_key`` will simply have none — the provider call then fails loudly
     rather than silently borrowing a shared server key.
     """
-    # azure_foundry still needs the litellm ``azure_ai/<model>`` routing prefix
-    # even when the key is supplied explicitly on the config.
-    model_override = f"azure_ai/{config.model}" if config.provider.value == "azure_foundry" else None
+    # azure_foundry/local still need their real litellm routing prefix (see
+    # _LITELLM_PROVIDER_PREFIX) even when the key is supplied explicitly on
+    # the config.
+    prefix = _LITELLM_PROVIDER_PREFIX.get(config.provider)
+    model_override = f"{prefix}/{config.model}" if prefix else None
     return {
         "api_key": config.api_key,
         "api_base": config.api_base,

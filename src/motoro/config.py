@@ -60,6 +60,16 @@ class CoreSettings(BaseSettings):
     anthropic_foundry_resource: str = Field(default="", validation_alias="ANTHROPIC_FOUNDRY_RESOURCE")
     # AWS region for Bedrock; litellm reads the bearer token from api_key.
     bedrock_region: str = Field(default="", validation_alias="AWS_REGION")
+    openrouter_api_key: str = Field(default="", validation_alias="OPENROUTER_API_KEY")
+    # A self-hosted OpenAI-compatible server (LM Studio, vLLM, llama.cpp, …) --
+    # routed through litellm's generic `openai/` provider (see
+    # services.llm_service._LITELLM_PROVIDER_PREFIX), so unlike every other
+    # provider here there is no fixed default base URL to fall back to.
+    # `local_api_key` is optional since most self-hosted servers don't check
+    # one; litellm still requires *some* string, so services.credentials
+    # substitutes a placeholder when this is empty.
+    local_api_base: str = Field(default="", validation_alias="LOCAL_LLM_API_BASE")
+    local_api_key: str = Field(default="", validation_alias="LOCAL_LLM_API_KEY")
 
     # LLM bridge
     #

@@ -131,6 +131,12 @@ ANTHROPIC_API_KEY=sk-ant-...
 # or, for Anthropic on Microsoft Foundry — BOTH are required:
 ANTHROPIC_FOUNDRY_API_KEY=...
 ANTHROPIC_FOUNDRY_RESOURCE=my-resource
+# or OpenRouter:
+OPENROUTER_API_KEY=sk-or-...
+# or a self-hosted OpenAI-compatible server (LM Studio, vLLM, llama.cpp, …) —
+# LOCAL_LLM_API_BASE is required (there's no default host); LOCAL_LLM_API_KEY
+# is optional since most such servers don't check one:
+LOCAL_LLM_API_BASE=http://localhost:8000/v1
 ```
 
 These are bare-name conventional variables, not prefixed by the product's own
