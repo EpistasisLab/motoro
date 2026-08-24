@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from motoro.engine.context import RunContext
 from motoro.engine.phase import Phase, PhaseResult
+from motoro.engine.skills import inline_skills
 from motoro.models.run import RunStatus, RunStep, StepPhase
 from motoro.observability.metrics import record_error, record_phase, record_run
 from motoro.observability.tracing import get_tracer
@@ -66,6 +67,10 @@ class AgentConfig:
     # "" rather than being required so an external AgentConfig construction
     # that predates this field still works.
     name: str = ""
+    # Agent Skills already resolved to [{"name", "description", "body"}, ...] by
+    # the caller (``runner.execute_run`` via ``skill_service.resolve_skills``).
+    # Resolved outside the engine so the engine never has to reach for a table.
+    skills: list[dict[str, Any]] = field(default_factory=list)
 
 
 class AgentRuntime:
@@ -239,10 +244,20 @@ class AgentRuntime:
                 available_tools=available_tools or [],
                 agent_id=self._config.agent_id,
                 agent_name=self._config.name or None,
+                skills=self._config.skills or [],
                 run_id=run_id,
                 owner_id=self._llm_service.principal_id if self._llm_service else None,
             )
         context.memory_config_data = self._config.memory_config_data or {}
+
+        # The bare runtime has no patterns, so nothing here can offer the model
+        # a ``load_skill`` tool — skills only reach it inlined. Flagged in
+        # metadata so a resume (whose snapshot already carries the folded-in
+        # prompt) does not inline them again. See PatternOrchestrator.run, which
+        # does the same thing conditionally on the active patterns.
+        if context.skills and not context.metadata.get("skills_inlined"):
+            context.system_prompt = inline_skills(context.system_prompt, context.skills)
+            context.metadata["skills_inlined"] = True
 
         # Inject Redis-backed working memory if configured
         wm: WorkingMemoryManager | None = None

@@ -50,6 +50,13 @@ class Agent(Base):
     tool_config_data: Mapped[dict[str, Any]] = mapped_column("tool_config", JSON, nullable=False, default=dict)
     memory_config_data: Mapped[dict[str, Any]] = mapped_column("memory_config", JSON, nullable=False, default=dict)
     pattern_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, default=None)
+    # Which registered Skills this agent carries: {"skill_ids": [...]}. A
+    # reference rather than an embedded copy — a skill is an independently
+    # editable, reusable document (``models.skill.Skill``), so an agent points
+    # at one the same way ``tool_config`` points at tools rather than inlining
+    # their schemas. Resolved to bodies at run time by
+    # ``services.skill_service.resolve_skills``.
+    skill_config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True, default=None)
     # Optional output contract: a compact field-spec ({"name", "fields": [...]})
     # used to extract a structured payload into the run output envelope. None
     # means the run still gets the universal envelope, just no domain payload.

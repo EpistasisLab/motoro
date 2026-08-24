@@ -32,6 +32,7 @@ import motoro.models.memory  # noqa: F401
 import motoro.models.pattern  # noqa: F401
 import motoro.models.pricing  # noqa: F401
 import motoro.models.run  # noqa: F401
+import motoro.models.skill  # noqa: F401
 from motoro.config import settings
 from motoro.migrations import VERSION_TABLE, include_object
 from motoro.models.base import Base

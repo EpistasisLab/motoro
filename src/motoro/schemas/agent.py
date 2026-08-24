@@ -29,6 +29,20 @@ class MemoryConfig(BaseModel):
     episodic_memory_enabled: bool = False
 
 
+class SkillConfig(BaseModel):
+    """Which registered Agent Skills an agent carries.
+
+    Ids, not bodies: a skill is an independently editable document
+    (:class:`motoro.models.skill.Skill`), and the order here is the order the
+    agent's skill index lists them in. ``extra="allow"`` so a product can hang
+    its own bookkeeping off the same column without a core schema change.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    skill_ids: list[uuid.UUID] = Field(default_factory=list)
+
+
 class ModelConfig(BaseModel):
     """LLM model configuration."""
 
@@ -110,6 +124,10 @@ class AgentCreate(BaseModel):
         default=None,
         description="Architectural patterns to activate for this agent.",
     )
+    skill_config: SkillConfig | None = Field(
+        default=None,
+        description="Registered Agent Skills to attach to this agent.",
+    )
     output_contract: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -139,6 +157,10 @@ class AgentUpdate(BaseModel):
         default=None,
         description="Update the agent's active architectural patterns.",
     )
+    skill_config: SkillConfig | None = Field(
+        default=None,
+        description="Update the agent's attached skills; {'skill_ids': []} detaches all.",
+    )
     output_contract: dict[str, Any] | None = Field(
         default=None,
         description="Update the agent's output contract (field-spec for payload extraction).",
@@ -164,6 +186,7 @@ class AgentResponse(BaseModel):
     budget_limit_usd: float | None = None
     max_run_duration_seconds: int | None = None
     pattern_config: PatternConfig | None = None
+    skill_config: SkillConfig | None = None
     output_contract: dict[str, Any] | None = None
     auto_eval_enabled: bool = True
     auto_eval_model: str | None = None

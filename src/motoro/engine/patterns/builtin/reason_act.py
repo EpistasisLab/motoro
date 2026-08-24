@@ -32,6 +32,12 @@ from motoro.engine.patterns.prompts.reason_act import (
     window_messages,
 )
 from motoro.engine.patterns.registry import PluginRegistry
+from motoro.engine.skills import (
+    build_load_skill_tool,
+    render_skill_body,
+    render_skill_index,
+    resolve_load_skill_name,
+)
 from motoro.models.pattern import PatternCategory, PatternPhase
 from motoro.models.run import RunStep, StepPhase
 from motoro.schemas.llm import (
@@ -61,6 +67,7 @@ _KEY_MAX_ITER_HIT = "reason_act_max_iterations_hit"
 _KEY_TOOL_CALLS = "reason_act_tool_calls"
 _KEY_TERMINATION = "reason_act_termination"
 _KEY_STATE = "reason_act_state"
+_KEY_SKILLS_OPENED = "reason_act_skills_opened"
 
 
 @PluginRegistry.register
@@ -76,6 +83,11 @@ class ReasonActPlugin(PatternPlugin):
 
     slug = "reason_act"
     category = PatternCategory.EXECUTION
+
+    # This loop discloses skills progressively — an index in the prompt prefix,
+    # bodies via a bound ``load_skill`` tool — so the orchestrator must not
+    # inline them. See ``motoro.engine.skills``.
+    consumes_skills: ClassVar[bool] = True
 
     display_name: ClassVar[str] = "ReAct"
     description: ClassVar[str] = (
@@ -293,18 +305,27 @@ class ReasonActPlugin(PatternPlugin):
 
         from motoro.mcp.adapters import build_openai_tool_name_map, tools_to_openai_format
 
+        skills = context.skills or []
+
         messages: list[dict[str, Any]] = context.metadata.get(_KEY_MESSAGES) or []
         if not messages:
             messages = build_initial_messages(
                 sense_output=sense_output,
                 agent_system_prompt=context.system_prompt,
+                skill_index=render_skill_index(skills) if skills else "",
             )
             context.metadata[_KEY_MESSAGES] = messages
 
         tools = tools_to_openai_format(context.available_tools) if context.available_tools else []
         name_map = build_openai_tool_name_map(context.available_tools)
-        terminator = resolve_final_answer_name({str(t["function"]["name"]) for t in tools})
+        bound_names = {str(t["function"]["name"]) for t in tools}
+        terminator = resolve_final_answer_name(bound_names)
         tools.append(build_final_answer_tool(terminator))
+        # Bound every turn, not just the first: the model may decide a skill
+        # applies only once a tool result has told it what it is dealing with.
+        skill_loader = resolve_load_skill_name(bound_names | {terminator}) if skills else ""
+        if skill_loader:
+            tools.append(build_load_skill_tool(skills, skill_loader))
 
         # ``include_scratchpad: false`` means no memory of earlier turns, so the
         # window collapses to the stable system/user prefix.
@@ -369,16 +390,52 @@ class ReasonActPlugin(PatternPlugin):
             await self._record_turn(context, runtime, turn, llm_record)
             return await self._conclude(context, runtime, answer, "implicit_final_answer")
 
+        # ``load_skill`` is answered here, not dispatched: there is no MCP server
+        # behind it, only the skill bodies already on the context. Intercepted
+        # by name out of ``issued``, the same way the terminator above is.
+        skill_calls = [c for c in issued if skill_loader and c.tool_name == skill_loader]
+        dispatch = [c for c in issued if c not in skill_calls]
+
         turn = ReasonActStep(
             thought=completion.text,
             action=ReasonActAction.TOOL_CALL,
             tool_calls=issued,
         )
-        context.metadata[_KEY_TOOL_CALLS] = context.metadata.get(_KEY_TOOL_CALLS, 0) + len(issued)
+        # Counts real tool calls; opening a skill is a context operation, not an
+        # action taken in the world, and is tallied separately.
+        context.metadata[_KEY_TOOL_CALLS] = context.metadata.get(_KEY_TOOL_CALLS, 0) + len(dispatch)
         await self._record_turn(context, runtime, turn, llm_record)
 
+        if skill_calls:
+            opened: list[str] = list(context.metadata.get(_KEY_SKILLS_OPENED) or [])
+            for call in skill_calls:
+                requested = str(call.tool_args.get("name") or "")
+                # Every issued call needs an answering turn or the provider
+                # rejects the next request, so this is appended immediately —
+                # before Act runs for whatever else the same turn asked for.
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": render_skill_body(skills, requested)}
+                )
+                opened.append(requested)
+                log.info("reason_act.skill_opened", skill=requested, step=step_count, component="reason_act")
+            context.metadata[_KEY_SKILLS_OPENED] = opened
+            context.metadata[_KEY_MESSAGES] = messages
+
+        if not dispatch:
+            # The turn asked only for skills, which are already answered — there
+            # is nothing for Act to execute. Skip it and let the next iteration
+            # reason again with the instructions now in hand. ``_post_act`` will
+            # not run, so the ceiling it normally records is recorded here.
+            context.metadata.pop(_KEY_PENDING_CALLS, None)
+            context.metadata.pop(_KEY_TURN, None)
+            context.record_phase_output("plan", PlanOutput(steps=[], is_complete=False))
+            if step_count >= self.max_iterations:
+                context.metadata[_KEY_MAX_ITER_HIT] = True
+                context.metadata[_KEY_TERMINATION] = "max_iterations"
+            return HookAction.SKIP_PHASE
+
         context.metadata[_KEY_TURN] = turn.model_dump()
-        context.metadata[_KEY_PENDING_CALLS] = [c.model_dump() for c in issued]
+        context.metadata[_KEY_PENDING_CALLS] = [c.model_dump() for c in dispatch]
         context.record_phase_output(
             "plan",
             PlanOutput(
@@ -394,7 +451,7 @@ class ReasonActPlugin(PatternPlugin):
                         tool_name=call.tool_name,
                         tool_args=call.tool_args,
                     )
-                    for call in issued
+                    for call in dispatch
                 ],
                 is_complete=False,
             ),

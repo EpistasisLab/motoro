@@ -87,6 +87,7 @@ def build_final_answer_tool(name: str = FINAL_ANSWER_TOOL) -> dict[str, Any]:
 def build_initial_messages(
     sense_output: SenseOutput,
     agent_system_prompt: str = "",
+    skill_index: str = "",
 ) -> list[dict[str, Any]]:
     """Build the opening message history for a ReasonAct run.
 
@@ -95,6 +96,13 @@ def build_initial_messages(
     provider prompt caching holds across the loop — up until
     ``window_messages`` starts dropping turns past ``scratchpad_window``, from
     which point the sent prefix shifts every turn and the cache is reset.
+
+    *skill_index* is the always-loaded half of Agent Skills (see
+    :func:`motoro.engine.skills.render_skill_index`) — names and descriptions
+    only. It sits in this prefix precisely because it is stable: the index is
+    identical on every turn, so it is cached with the rest of the prefix, while
+    the bodies it points at arrive later as ordinary tool results and are never
+    paid for unless the model asks.
     """
     messages: list[dict[str, Any]] = [
         {"role": "system", "content": REASON_ACT_SYSTEM_PROMPT},
@@ -102,6 +110,9 @@ def build_initial_messages(
 
     if agent_system_prompt:
         messages.append({"role": "system", "content": f"Agent instructions: {agent_system_prompt}"})
+
+    if skill_index:
+        messages.append({"role": "system", "content": skill_index})
 
     context_parts: list[str] = [f"Goal: {sense_output.agent_goal}"]
 

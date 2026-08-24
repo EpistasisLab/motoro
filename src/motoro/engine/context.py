@@ -68,6 +68,13 @@ class RunContext:
     # Memory context (populated by Sense from memory service)
     memories: list[dict[str, Any]] = field(default_factory=list)
 
+    # Agent Skills carried by this run: [{"name", "description", "body"}, ...],
+    # resolved from the agent's skill_config before the first phase. Part of the
+    # snapshot below, unlike agent_id/agent_name: a skill can be edited or
+    # deleted while a run is paused, and a resumed run must continue against the
+    # instructions it was actually following, not whatever the row says now.
+    skills: list[dict[str, Any]] = field(default_factory=list)
+
     # Optional Redis-backed working memory (injected by runtime when configured)
     working_memory_manager: WorkingMemoryManager | None = field(default=None)
 
@@ -206,6 +213,7 @@ class RunContext:
             "conversation_history": self.conversation_history,
             "available_tools": self.available_tools,
             "memories": self.memories,
+            "skills": self.skills,
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
             "total_cost": self.total_cost,
@@ -242,6 +250,7 @@ class RunContext:
             conversation_history=data.get("conversation_history", []),
             available_tools=data.get("available_tools", []),
             memories=data.get("memories", []),
+            skills=data.get("skills", []),
             total_prompt_tokens=data.get("total_prompt_tokens", 0),
             total_completion_tokens=data.get("total_completion_tokens", 0),
             total_cost=data.get("total_cost", 0.0),

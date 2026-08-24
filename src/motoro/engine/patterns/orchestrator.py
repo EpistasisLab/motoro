@@ -19,6 +19,7 @@ from motoro.engine.patterns import catalog, composition
 from motoro.engine.patterns.base import HookAction, HookCallable, HookPoint, PatternPlugin
 from motoro.engine.patterns.registry import PluginRegistry
 from motoro.engine.runtime import AgentRunResult, AgentRuntime
+from motoro.engine.skills import inline_skills
 from motoro.models.pattern import PatternCategory
 from motoro.models.run import RunStatus, StepPhase
 from motoro.observability.metrics import record_hook_duration
@@ -40,6 +41,10 @@ logger = logging.getLogger(__name__)
 # The one thing it needs that the baseline does not is provider-side function
 # calling; callers that can see the model guard for it (see the factory below).
 DEFAULT_EXECUTION_PATTERN = "reason_act"
+
+# Marks that skill bodies have already been folded into context.system_prompt,
+# so a resumed run does not fold them in a second time.
+_KEY_SKILLS_INLINED = "skills_inlined"
 
 # Phase name ↔ StepPhase mapping
 _PHASE_SEQUENCE: list[tuple[str, StepPhase]] = [
@@ -207,6 +212,7 @@ class PatternOrchestrator:
                 available_tools=available_tools or [],
                 agent_id=rt._config.agent_id,
                 agent_name=rt._config.name or None,
+                skills=rt._config.skills or [],
                 run_id=run_id,
                 owner_id=rt._llm_service.principal_id if rt._llm_service else None,
             )
@@ -271,6 +277,22 @@ class PatternOrchestrator:
                 total_cost=context.total_cost,
                 error=_activate_err,
                 context_snapshot=None,
+            )
+
+        # Skills the active patterns will not disclose on demand have to be in
+        # the prompt from the start, or they have no effect at all. Guarded by a
+        # metadata flag rather than by "is this a resume", because the inlined
+        # prompt is itself part of the snapshot — re-inlining on resume would
+        # duplicate every skill body.
+        _skills_handled = context.metadata.get(_KEY_SKILLS_INLINED) or any(
+            p.consumes_skills for p in self._plugins
+        )
+        if context.skills and not _skills_handled:
+            context.system_prompt = inline_skills(context.system_prompt, context.skills)
+            context.metadata[_KEY_SKILLS_INLINED] = True
+            logger.info(
+                "orchestrator.skills_inlined",
+                extra={"count": len(context.skills), "reason": "no active pattern consumes skills"},
             )
 
         final_output = ""

@@ -86,6 +86,7 @@ async def init_schema(*, drop_first: bool = False) -> None:
     import motoro.models.pattern  # noqa: F401  PLC0415
     import motoro.models.pricing  # noqa: F401  PLC0415
     import motoro.models.run  # noqa: F401  PLC0415
+    import motoro.models.skill  # noqa: F401  PLC0415
     from motoro.models.base import Base
     from motoro.models.database import get_engine
 
@@ -174,6 +175,7 @@ async def create_agent(
     pattern_config: dict[str, Any] | None = None,
     tool_config: dict[str, Any] | None = None,
     memory_config: dict[str, Any] | None = None,
+    skill_config: dict[str, Any] | None = None,
     output_contract: dict[str, Any] | None = None,
     budget_limit_usd: float | None = None,
     max_run_duration_seconds: int | None = None,
@@ -188,6 +190,13 @@ async def create_agent(
     PatternConfigError` if it names an unregistered pattern, misconfigures one, or
     leaves a dependency unsatisfiable — so a typo fails here rather than after a
     run has been created and a model billed.
+
+    *skill_config* attaches registered Agent Skills, as
+    ``{"skill_ids": [...]}`` — see :mod:`motoro.services.skill_service`. The ids
+    are not validated here: a skill can be deleted long after an agent
+    references it, so resolution is deliberately tolerant at run time (a missing
+    skill is skipped and logged) rather than strict at create time, which would
+    only move the same failure somewhere less useful.
 
     *output_contract*, given, makes :func:`execute_run` run one extraction pass
     per completed run coercing its free-text output into the contracted fields
@@ -211,6 +220,7 @@ async def create_agent(
         tool_config_data=tool_config or {},
         memory_config_data=memory_config or {},
         pattern_config=pattern_config,
+        skill_config=skill_config,
         output_contract=output_contract,
         budget_limit_usd=budget_limit_usd,
         max_run_duration_seconds=max_run_duration_seconds,
@@ -267,6 +277,7 @@ async def update_agent(
     pattern_config: dict[str, Any] | None = None,
     tool_config: dict[str, Any] | None = None,
     memory_config: dict[str, Any] | None = None,
+    skill_config: dict[str, Any] | None = None,
     output_contract: dict[str, Any] | None = None,
     budget_limit_usd: float | None = None,
     max_run_duration_seconds: int | None = None,
@@ -308,6 +319,11 @@ async def update_agent(
             agent.tool_config_data = tool_config
         if memory_config is not None:
             agent.memory_config_data = memory_config
+        if skill_config is not None:
+            # ``{"skill_ids": []}`` is how a caller detaches every skill — the
+            # None-means-unchanged convention above leaves no other way to say
+            # "none", and an empty list is unambiguous.
+            agent.skill_config = skill_config
         if output_contract is not None:
             agent.output_contract = output_contract
         if budget_limit_usd is not None:
@@ -487,6 +503,7 @@ async def execute_run(
     from motoro.engine.runtime import AgentConfig, AgentRuntime
     from motoro.memory.working import WorkingMemoryConfig
     from motoro.services.llm_service import LLMService, model_supports_tool_calling
+    from motoro.services.skill_service import resolve_skills
 
     async with _session("execute_run") as db:
         run = (
@@ -496,6 +513,11 @@ async def execute_run(
 
         effective_model_config_data = {**(agent.model_config_data or {}), **(run.model_config_overrides or {})}
         model_config = ModelConfig(**effective_model_config_data)
+        # Resolved here, once, rather than inside the engine: the engine never
+        # reaches for a table, and a run then carries the skill *text* it
+        # started with, so editing a skill mid-run cannot change the
+        # instructions the agent is halfway through following.
+        skills = await resolve_skills(agent.skill_config, owner_id=agent.owner_id, db=db)
         config = AgentConfig(
             agent_id=agent.id,
             name=agent.name,
@@ -503,6 +525,7 @@ async def execute_run(
             system_prompt=agent.system_prompt or f"You are {agent.name}. {agent.description}",
             model_config=model_config,
             memory_config_data=agent.memory_config_data or {},
+            skills=skills,
         )
 
         llm = llm_service or LLMService(principal_id=principal_id or run.owner_id)

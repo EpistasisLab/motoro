@@ -368,6 +368,54 @@ Both were invisible until a live server was actually exercised — worth
 knowing if you're deciding whether to trust an unbounded dependency range or
 a concurrency optimization you haven't load-tested.
 
+## Skills: a file, not a directory
+
+An [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)
+is specified as a *directory* whose only required member is `SKILL.md` —
+YAML frontmatter with `name` and `description`, then a Markdown body. Core
+stores the file, not the directory: `models.skill.Skill` is one row of
+`(name, description, body)`, behind `services.skill_service`.
+
+That is not a simplification of the format, it's the format's own degenerate
+case. The directory exists to bundle *optional* level-3 resources — scripts,
+templates, reference docs — and a skill with none of those is exactly one
+`SKILL.md`. The part core genuinely can't support is bundled **scripts**: a
+Motoro agent's only side-channel is an MCP tool call, so there is no shell and
+no sandbox to run them in. A skill that needs to execute code should ship as
+an MCP server instead; that's already a first-class thing here.
+
+```python
+from motoro.services.skill_service import create_skill_from_markdown
+skill = await create_skill_from_markdown(uploaded_text, owner_id=user_id)
+await create_agent(..., skill_config={"skill_ids": [str(skill.id)]})
+```
+
+`skill_config` is the sixth agent capability axis, alongside `model_config`,
+`tool_config`, `memory_config`, `pattern_config`, and `output_contract`. It
+holds **ids, not bodies** — a skill is independently editable, and the
+declared order is the order the agent's index lists them in. `execute_run`
+resolves it once, at run start, into the `RunContext.skills` snapshot, so
+editing or deleting a skill mid-run (or while a run is paused) can't change
+what that run was already told.
+
+**Progressive disclosure is a pattern's job, and it's opt-in.**
+`PatternPlugin.consumes_skills` (default `False`) declares that a pattern
+renders skills itself. `reason_act` sets it: it puts the level-1 index
+(name + description, ~100 tokens each) in the cached stable prefix of the
+message list and binds a `load_skill` pseudo-tool — engine-injected, with the
+real skill names as a JSON-Schema `enum`, intercepted out of `issued` in
+`_pre_act` exactly the way `final_answer` is — so a body only enters the
+context when the model asks for it. Every other pattern gets bodies **inlined
+into the system prompt** by the orchestrator. Opt-in rather than opt-out is
+the point: a pattern that has never heard of skills degrades to
+expensive-but-correct instead of silently dropping them.
+
+A `load_skill`-only turn issues no real tool call, so `_pre_act` appends the
+body as a `role: "tool"` result (every issued call id must be answered) and
+returns `HookAction.SKIP_PHASE`. Since `act` is last in reason_act's phase
+sequence, that advances the iteration normally — and `context.max_iterations`
+still bounds a model that does nothing but open skills.
+
 ## Resolution order for credentials
 
 Resolution happens at **call time**, via `services.credentials`, in this

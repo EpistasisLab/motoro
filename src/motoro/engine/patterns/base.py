@@ -146,6 +146,18 @@ class PatternPlugin(ABC):
     # orchestrator default."
     recommended_hook_timeout: ClassVar[float | None] = None
 
+    # Optional: this plugin presents ``context.skills`` to the model itself,
+    # with progressive disclosure — a metadata index in the prompt prefix and a
+    # ``load_skill`` tool for the bodies (see ``motoro.engine.skills``).
+    # Declaring it suppresses the orchestrator's fallback, which otherwise
+    # inlines every skill body into the system prompt.
+    #
+    # Opt-in rather than opt-out on purpose: a pattern that does nothing about
+    # skills should still honour them, expensively, rather than silently drop
+    # them. Only a pattern that has actually wired up a tool loop can claim the
+    # cheap path.
+    consumes_skills: ClassVar[bool] = False
+
     # -- Configuration ------------------------------------------------------
 
     @abstractmethod
