@@ -34,9 +34,13 @@ from motoro.engine.patterns.prompts.reason_act import (
 from motoro.engine.patterns.registry import PluginRegistry
 from motoro.engine.skills import (
     build_load_skill_tool,
+    build_read_skill_file_tool,
     render_skill_body,
+    render_skill_file,
     render_skill_index,
     resolve_load_skill_name,
+    resolve_read_skill_file_name,
+    skill_file_paths,
 )
 from motoro.models.pattern import PatternCategory, PatternPhase
 from motoro.models.run import RunStep, StepPhase
@@ -326,6 +330,16 @@ class ReasonActPlugin(PatternPlugin):
         skill_loader = resolve_load_skill_name(bound_names | {terminator}) if skills else ""
         if skill_loader:
             tools.append(build_load_skill_tool(skills, skill_loader))
+        # Level 3, and only when some skill actually bundles something: the tool's
+        # enum of readable paths would otherwise be empty, which some providers
+        # reject outright and the rest turn into a dead affordance.
+        file_reader = (
+            resolve_read_skill_file_name(bound_names | {terminator, skill_loader})
+            if skill_loader and skill_file_paths(skills)
+            else ""
+        )
+        if file_reader:
+            tools.append(build_read_skill_file_tool(skills, file_reader))
 
         # ``include_scratchpad: false`` means no memory of earlier turns, so the
         # window collapses to the stable system/user prefix.
@@ -390,11 +404,13 @@ class ReasonActPlugin(PatternPlugin):
             await self._record_turn(context, runtime, turn, llm_record)
             return await self._conclude(context, runtime, answer, "implicit_final_answer")
 
-        # ``load_skill`` is answered here, not dispatched: there is no MCP server
-        # behind it, only the skill bodies already on the context. Intercepted
-        # by name out of ``issued``, the same way the terminator above is.
+        # ``load_skill`` and ``read_skill_file`` are answered here, not dispatched:
+        # there is no MCP server behind either, only the skill bodies and bundled
+        # files already resolved onto the context. Intercepted by name out of
+        # ``issued``, the same way the terminator above is.
         skill_calls = [c for c in issued if skill_loader and c.tool_name == skill_loader]
-        dispatch = [c for c in issued if c not in skill_calls]
+        file_calls = [c for c in issued if file_reader and c.tool_name == file_reader]
+        dispatch = [c for c in issued if c not in skill_calls and c not in file_calls]
 
         turn = ReasonActStep(
             thought=completion.text,
@@ -414,11 +430,24 @@ class ReasonActPlugin(PatternPlugin):
                 # rejects the next request, so this is appended immediately —
                 # before Act runs for whatever else the same turn asked for.
                 messages.append(
-                    {"role": "tool", "tool_call_id": call.id, "content": render_skill_body(skills, requested)}
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": render_skill_body(skills, requested, file_tool_name=file_reader),
+                    }
                 )
                 opened.append(requested)
                 log.info("reason_act.skill_opened", skill=requested, step=step_count, component="reason_act")
             context.metadata[_KEY_SKILLS_OPENED] = opened
+            context.metadata[_KEY_MESSAGES] = messages
+
+        if file_calls:
+            for call in file_calls:
+                wanted = str(call.tool_args.get("path") or "")
+                messages.append(
+                    {"role": "tool", "tool_call_id": call.id, "content": render_skill_file(skills, wanted)}
+                )
+                log.info("reason_act.skill_file_read", path=wanted, step=step_count, component="reason_act")
             context.metadata[_KEY_MESSAGES] = messages
 
         if not dispatch:

@@ -8,10 +8,13 @@ the expensive part that stays out of the context window until it is wanted.
 The engine honours the split (see :mod:`motoro.engine.skills`); this module is
 the half that turns a file into a row and a row back into a file.
 
-Why the *file* and not the directory the published format describes: see
-:mod:`motoro.models.skill`. Short version — a skill with no bundled resources
-is exactly one ``SKILL.md``, and bundled scripts presume a shell no Motoro
-agent has.
+A skill may also arrive as the *directory* the published format describes —
+``code-simplification/SKILL.md`` plus whatever reference documents sit beside
+it. :func:`parse_skill_bundle` takes those files as ``(relative path, text)``
+pairs and splits them into the ``SKILL.md`` and its level-3 companions, which
+are stored as :class:`motoro.models.skill.SkillFile` rows. What is still
+refused is a bundled *script*: see :mod:`motoro.models.skill` for why, and
+:func:`validate_bundle_path` for where.
 
 Frontmatter keys other than ``name``/``description`` (``license``,
 ``allowed-tools``, ``metadata``) are parsed and discarded rather than stored.
@@ -36,10 +39,10 @@ from typing import TYPE_CHECKING, Any
 import yaml
 from sqlalchemy import or_, select
 
-from motoro.models.skill import Skill
+from motoro.models.skill import Skill, SkillFile
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Iterable, Sequence
     from contextlib import AbstractAsyncContextManager
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -48,6 +51,20 @@ logger = logging.getLogger(__name__)
 
 MAX_NAME_LENGTH = 64
 MAX_DESCRIPTION_LENGTH = 1024
+
+# The entry point of a skill directory, by the format's definition. Matched
+# case-insensitively on upload because a browser hands back whatever the
+# filesystem stored, and a `skill.md` is unambiguously the same intent.
+SKILL_MD = "SKILL.md"
+
+# Bundle caps. Not the format's — it has none, because it assumes a filesystem
+# where an unread file costs nothing. Core's bundle is loaded whole when a run
+# resolves the skill (see resolve_skills), so "cheap until read" stops being
+# true of memory even though it stays true of context, and something has to
+# bound it. Generous against real skills, whose level-3 material is prose.
+MAX_BUNDLE_FILES = 50
+MAX_BUNDLE_BYTES = 1_000_000
+MAX_BUNDLE_PATH_LENGTH = 255
 
 # The format's own name rule: lowercase letters, digits and hyphens. It is not
 # cosmetic — the name is what a directory would be called on disk and what the
@@ -81,6 +98,20 @@ class ParsedSkill:
     name: str
     description: str
     body: str
+
+
+@dataclass(frozen=True)
+class ParsedSkillBundle:
+    """A whole skill directory: its ``SKILL.md`` and its level-3 companions.
+
+    ``files`` is ordered, and that order is preserved into storage — it is what
+    the "bundled files" listing an agent sees is sorted by, so it should be
+    stable between an upload and a re-upload rather than whatever order the
+    caller's filesystem or the database happened to produce.
+    """
+
+    skill: ParsedSkill
+    files: tuple[tuple[str, str], ...]
 
 
 def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
@@ -163,11 +194,12 @@ def parse_skill_markdown(text: str) -> ParsedSkill:
 def render_skill_md(skill: Skill | ParsedSkill) -> str:
     """Render a stored skill back to a ``SKILL.md`` document.
 
-    The round trip is what keeps the single-file model spec-conformant: write
-    this to ``<root>/<name>/SKILL.md`` and the result is a valid skill
-    directory, so a stored skill can always leave core in the format it arrived
-    in. ``yaml.safe_dump`` does the quoting, so a description containing a
-    colon or a quote survives the trip.
+    The round trip is what keeps the stored form spec-conformant: write this to
+    ``<root>/<name>/SKILL.md``, write each :class:`SkillFile` to
+    ``<root>/<name>/<path>``, and the result is a valid skill directory — so a
+    stored skill can always leave core in the format it arrived in.
+    ``yaml.safe_dump`` does the quoting, so a description containing a colon or
+    a quote survives the trip.
     """
     front = yaml.safe_dump(
         {"name": skill.name, "description": skill.description},
@@ -177,6 +209,144 @@ def render_skill_md(skill: Skill | ParsedSkill) -> str:
     ).strip()
     body = (skill.body or "").strip()
     return f"---\n{front}\n---\n\n{body}\n" if body else f"---\n{front}\n---\n"
+
+
+# --------------------------------------------------------------------------- #
+#  Bundles (the directory form)                                                #
+# --------------------------------------------------------------------------- #
+
+# Extensions core will store as a bundled level-3 file. An allow-list rather
+# than a deny-list: the question is not "is this dangerous" but "can a Motoro
+# agent do anything at all with it", and the only answer is "read it into the
+# context window". Anything outside this list either needs a shell (a script)
+# or cannot enter a context window (an image, a font, a .docx), so storing it
+# would be storing something no run can ever reach.
+BUNDLE_TEXT_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".toml"})
+
+# Suffixes worth naming in the error, because they are the ones a real skill
+# from the wild actually ships and whose rejection therefore needs explaining
+# rather than merely reporting.
+_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".ts", ".rb", ".pl", ".ps1"})
+
+
+def _normalise_bundle_path(path: str) -> str:
+    """Forward slashes, no leading ``./``, otherwise untouched.
+
+    Deliberately *not* ``lstrip("./")``: that strips a character *set*, so it
+    would quietly turn ``/etc/passwd`` into ``etc/passwd`` and ``../x`` into
+    ``x`` — normalising away the very things :func:`validate_bundle_path` then
+    checks for.
+    """
+    cleaned = (path or "").strip().replace("\\", "/")
+    while cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+    return cleaned
+
+
+def validate_bundle_path(path: str) -> str:
+    """Return *path* normalised for storage, or raise :class:`SkillFormatError`.
+
+    Normalised means: forward slashes, no leading ``./``, relative to the skill
+    directory. Rejected means anything that is not a plain relative path to a
+    readable text file — absolute paths, ``..`` traversal, hidden segments, and
+    the suffixes outside :data:`BUNDLE_TEXT_SUFFIXES`.
+
+    The traversal checks matter even though nothing here touches a filesystem:
+    a product rendering a bundle back out to disk (the ``render_skill_md``
+    round trip) would otherwise write wherever the stored path pointed, so the
+    guarantee has to hold at the boundary where the path is accepted rather
+    than at each place it is later used.
+    """
+    cleaned = _normalise_bundle_path(path)
+    if not cleaned:
+        raise SkillFormatError("A bundled skill file must have a path.")
+    if len(cleaned) > MAX_BUNDLE_PATH_LENGTH:
+        raise SkillFormatError(
+            f"Bundled file path '{cleaned[:60]}...' is longer than {MAX_BUNDLE_PATH_LENGTH} characters."
+        )
+    if cleaned.startswith("/"):
+        raise SkillFormatError(f"Bundled file path '{cleaned}' must be relative to the skill directory.")
+    segments = cleaned.split("/")
+    if any(segment in ("", ".", "..") for segment in segments):
+        raise SkillFormatError(f"Bundled file path '{cleaned}' may not contain '.' or '..' segments.")
+    if any(segment.startswith(".") for segment in segments):
+        # .git, .DS_Store and friends: a folder picker hands over the whole
+        # subtree, and none of it is part of the skill.
+        raise SkillFormatError(f"Bundled file path '{cleaned}' may not contain hidden segments.")
+    suffix = ("." + segments[-1].rsplit(".", 1)[-1].lower()) if "." in segments[-1] else ""
+    if suffix in _SCRIPT_SUFFIXES:
+        raise SkillFormatError(
+            f"'{cleaned}' is a script, and a Motoro agent has no shell to run one in — its only "
+            "way to act is an MCP tool call. Register the code as an MCP server instead, and keep "
+            "the skill to the instructions that say when to call it."
+        )
+    if suffix not in BUNDLE_TEXT_SUFFIXES:
+        allowed = ", ".join(sorted(BUNDLE_TEXT_SUFFIXES))
+        raise SkillFormatError(
+            f"'{cleaned}' is not a text file a skill can be read from. A bundled file reaches an "
+            f"agent by being read into its context window, so it must be one of: {allowed}."
+        )
+    return cleaned
+
+
+def parse_skill_bundle(files: Iterable[tuple[str, str]]) -> ParsedSkillBundle:
+    """Parse a whole skill directory into its ``SKILL.md`` and level-3 files.
+
+    *files* is ``(relative path, text)`` pairs — relative to the skill
+    directory itself, so ``SKILL.md`` and ``references/schema.md``, not
+    ``code-simplification/SKILL.md``. Stripping the leading directory segment is
+    the caller's job, because only the caller knows whether the user picked the
+    skill folder or its parent.
+
+    Raises :class:`SkillFormatError` if there is no ``SKILL.md``, if it does not
+    parse, or if any companion file fails :func:`validate_bundle_path`. Refusing
+    the whole upload on one bad file is deliberate: a partially-stored skill is
+    one whose ``SKILL.md`` links to documents that are silently not there.
+    """
+    entries = list(files)
+    skill_md: str | None = None
+    bundled: list[tuple[str, str]] = []
+    total_bytes = 0
+
+    for raw_path, text in entries:
+        normalised = _normalise_bundle_path(raw_path)
+        if normalised.lower() == SKILL_MD.lower():
+            if skill_md is not None:
+                raise SkillFormatError("That folder contains more than one SKILL.md.")
+            skill_md = text
+            continue
+        bundled.append((validate_bundle_path(raw_path), text))
+        total_bytes += len(text.encode("utf-8"))
+
+    if skill_md is None:
+        raise SkillFormatError(
+            "That folder has no SKILL.md. An Agent Skill is a directory whose entry point is a "
+            "SKILL.md holding the name/description frontmatter — pick the skill's own folder, not "
+            "the folder containing it."
+        )
+    if len(bundled) > MAX_BUNDLE_FILES:
+        raise SkillFormatError(
+            f"That skill bundles {len(bundled)} files, more than the {MAX_BUNDLE_FILES} limit."
+        )
+    if total_bytes > MAX_BUNDLE_BYTES:
+        raise SkillFormatError(
+            f"That skill's bundled files total {total_bytes // 1000}KB, more than the "
+            f"{MAX_BUNDLE_BYTES // 1000}KB limit."
+        )
+
+    seen: set[str] = set()
+    for path, _text in bundled:
+        lowered = path.lower()
+        if lowered in seen:
+            raise SkillFormatError(f"That folder contains '{path}' more than once (paths are case-insensitive).")
+        seen.add(lowered)
+
+    return ParsedSkillBundle(skill=parse_skill_markdown(skill_md), files=tuple(bundled))
+
+
+def bundle_paths(skill: Skill) -> list[str]:
+    """The bundled file paths of *skill*, in upload order."""
+    return [f.path for f in skill.files]
 
 
 # --------------------------------------------------------------------------- #
@@ -192,12 +362,15 @@ async def create_skill(
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
     source_filename: str | None = None,
+    files: Iterable[tuple[str, str]] = (),
 ) -> Skill:
     """Persist a skill from already-separated fields.
 
     Both metadata fields are validated here as well as in
     :func:`parse_skill_markdown`, so a caller that builds a skill in a form
-    (rather than uploading a file) cannot bypass the format's rules.
+    (rather than uploading a file) cannot bypass the format's rules. The same
+    goes for *files*, whose paths run through :func:`validate_bundle_path` here
+    and not only in :func:`parse_skill_bundle`.
     """
     skill = Skill(
         name=validate_skill_name(name.strip()),
@@ -206,6 +379,10 @@ async def create_skill(
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
+        files=[
+            SkillFile(path=validate_bundle_path(path), content=content, position=index)
+            for index, (path, content) in enumerate(files)
+        ],
     )
     async with _session("create_skill") as db:
         db.add(skill)
@@ -230,6 +407,31 @@ async def create_skill_from_markdown(
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
+    )
+
+
+async def create_skill_from_bundle(
+    files: Iterable[tuple[str, str]],
+    *,
+    owner_id: uuid.UUID | None = None,
+    is_system: bool = False,
+    source_filename: str | None = None,
+) -> Skill:
+    """Parse a whole skill directory and persist it, bundled files and all.
+
+    The directory-shaped counterpart to :func:`create_skill_from_markdown`, and
+    the entry point a folder upload should use. *source_filename* is the folder
+    the user picked, for the same display-only purpose as the single-file case.
+    """
+    bundle = parse_skill_bundle(files)
+    return await create_skill(
+        name=bundle.skill.name,
+        description=bundle.skill.description,
+        body=bundle.skill.body,
+        owner_id=owner_id,
+        is_system=is_system,
+        source_filename=source_filename,
+        files=bundle.files,
     )
 
 
@@ -263,10 +465,16 @@ async def update_skill(
     name: str | None = None,
     description: str | None = None,
     body: str | None = None,
+    files: Iterable[tuple[str, str]] | None = None,
 ) -> Skill | None:
     """Update a live skill. ``None`` means "leave unchanged" for every field.
 
     Returns ``None`` if *skill_id* does not name a live skill.
+
+    *files*, when given, is a **full replacement** of the bundle rather than a
+    merge, and ``[]`` empties it. A merge would have no way to express "this
+    re-upload dropped FORMS.md", and a stale document the SKILL.md no longer
+    mentions is exactly the kind of thing an agent still reads.
     """
     async with _session("update_skill") as db:
         skill = (
@@ -280,15 +488,45 @@ async def update_skill(
             skill.description = validate_skill_description(description)
         if body is not None:
             skill.body = body.strip()
+        if files is not None:
+            replacements = [
+                SkillFile(path=validate_bundle_path(path), content=content, position=index)
+                for index, (path, content) in enumerate(files)
+            ]
+            # Two flushes, deliberately. Clearing the collection is what fires
+            # delete-orphan; flushing before the inserts is what stops a
+            # re-upload keeping the same path from hitting
+            # uq_skill_files_skill_path, since a single flush orders the INSERTs
+            # ahead of the DELETEs.
+            skill.files = []
+            await db.flush()
+            skill.files = replacements
         await db.commit()
         await db.refresh(skill)
         return skill
 
 
 async def update_skill_from_markdown(skill_id: uuid.UUID, text: str) -> Skill | None:
-    """Replace a live skill's contents from a re-uploaded ``SKILL.md``."""
+    """Replace a live skill's contents from a re-uploaded ``SKILL.md``.
+
+    Leaves the bundled files alone — this is the single-file path, and a
+    ``SKILL.md`` on its own says nothing about whether its companions changed.
+    Use :func:`update_skill_from_bundle` to replace the whole directory.
+    """
     parsed = parse_skill_markdown(text)
     return await update_skill(skill_id, name=parsed.name, description=parsed.description, body=parsed.body)
+
+
+async def update_skill_from_bundle(skill_id: uuid.UUID, files: Iterable[tuple[str, str]]) -> Skill | None:
+    """Replace a live skill's whole directory from a re-uploaded folder."""
+    bundle = parse_skill_bundle(files)
+    return await update_skill(
+        skill_id,
+        name=bundle.skill.name,
+        description=bundle.skill.description,
+        body=bundle.skill.body,
+        files=bundle.files,
+    )
 
 
 async def delete_skill(skill_id: uuid.UUID) -> bool:
@@ -344,12 +582,19 @@ async def resolve_skills(
     *,
     owner_id: uuid.UUID | None = None,
     db: AsyncSession | None = None,
-) -> list[dict[str, str]]:
+) -> list[dict[str, Any]]:
     """Resolve an agent's ``skill_config`` into the skills a run should carry.
 
-    Returns ``[{"name", "description", "body"}, ...]`` in the order the agent
-    declared them — the order is the agent's, not the database's, because it is
-    the order the metadata block will list them in.
+    Returns ``[{"name", "description", "body", "files"}, ...]`` in the order the
+    agent declared them — the order is the agent's, not the database's, because
+    it is the order the metadata block will list them in.
+
+    ``files`` is ``{path: contents}`` for the skill's bundled level-3
+    documents, loaded whole here rather than fetched when the model asks for
+    one. Progressive disclosure is about the *context window*, not about the
+    read: :mod:`motoro.engine.skills` renders from a plain dict so it stays a
+    set of pure functions with no session to thread through a pattern's turn
+    loop, and MAX_BUNDLE_BYTES is what makes eager loading affordable.
 
     A referenced skill that has been deleted, or that belongs to another owner,
     is skipped with a log line rather than failing the run: losing one skill
@@ -376,11 +621,18 @@ async def resolve_skills(
             rows = (await own_db.execute(stmt)).scalars().all()
 
     by_id = {row.id: row for row in rows}
-    resolved: list[dict[str, str]] = []
+    resolved: list[dict[str, Any]] = []
     for skill_id in ids:
         skill = by_id.get(skill_id)
         if skill is None:
             logger.warning("skill_service.skill_unresolved", extra={"skill_id": str(skill_id)})
             continue
-        resolved.append({"name": skill.name, "description": skill.description, "body": skill.body or ""})
+        resolved.append(
+            {
+                "name": skill.name,
+                "description": skill.description,
+                "body": skill.body or "",
+                "files": {f.path: f.content for f in skill.files},
+            }
+        )
     return resolved

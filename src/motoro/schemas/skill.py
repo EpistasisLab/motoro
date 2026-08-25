@@ -17,7 +17,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class SkillCreate(BaseModel):
@@ -45,10 +45,23 @@ class SkillResponse(BaseModel):
     body: str
     is_system: bool = False
     source_filename: str | None = None
+    # Bundled level-3 paths only, never their contents: a list endpoint would
+    # otherwise carry every byte of every bundle, and nothing showing a skill
+    # needs the text — the agent reads it through ``read_skill_file``, and a
+    # product wanting to display it can ask the service for that one file.
+    files: list[str] = Field(default_factory=list)
     created_at: datetime
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+    @field_validator("files", mode="before")
+    @classmethod
+    def _paths_only(cls, value: object) -> object:
+        """Accept the ORM's ``list[SkillFile]`` as well as a plain list of paths."""
+        if isinstance(value, list):
+            return [item if isinstance(item, str) else getattr(item, "path", str(item)) for item in value]
+        return value
 
 
 class SkillListResponse(BaseModel):

@@ -368,27 +368,44 @@ Both were invisible until a live server was actually exercised — worth
 knowing if you're deciding whether to trust an unbounded dependency range or
 a concurrency optimization you haven't load-tested.
 
-## Skills: a file, not a directory
+## Skills: a directory, stored as rows
 
 An [Agent Skill](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview)
 is specified as a *directory* whose only required member is `SKILL.md` —
 YAML frontmatter with `name` and `description`, then a Markdown body. Core
-stores the file, not the directory: `models.skill.Skill` is one row of
-`(name, description, body)`, behind `services.skill_service`.
+stores that directory as **two tables**: `models.skill.Skill` is the
+`SKILL.md` (levels 1 and 2), and `models.skill.SkillFile` is one row per
+bundled level-3 file. A skill with no bundled resources is just a `Skill` row
+with an empty `files` — the format's own degenerate case, not a special case
+here.
 
-That is not a simplification of the format, it's the format's own degenerate
-case. The directory exists to bundle *optional* level-3 resources — scripts,
-templates, reference docs — and a skill with none of those is exactly one
-`SKILL.md`. The part core genuinely can't support is bundled **scripts**: a
-Motoro agent's only side-channel is an MCP tool call, so there is no shell and
-no sandbox to run them in. A skill that needs to execute code should ship as
-an MCP server instead; that's already a first-class thing here.
+Rows rather than a filesystem because a skill has no other reason to need
+one: no storage root to configure, no volume for a product's API and worker
+containers to agree on, and replacing or removing a bundle is a transaction
+rather than a directory tree to reconcile against the rows that describe it.
+
+The part core still can't support is bundled **scripts**, and that isn't a
+storage decision. A Motoro agent's only side-channel is an MCP tool call, so
+there is no shell, no working directory to resolve a relative path against,
+and no sandbox. Reading a reference document into context the engine can
+honour; executing `fill_form.py` it cannot, so an upload carrying one is
+rejected at the boundary (`skill_service.validate_bundle_path`) rather than
+silently accepted and quietly ignored. Same reasoning bounds the bundle to
+**text**: level 3 for a Motoro agent means "read this into the context
+window", and an asset that can neither enter one nor be executed has no way
+to affect a run. A skill that needs to execute code should ship as an MCP
+server instead; that's already a first-class thing here.
 
 ```python
-from motoro.services.skill_service import create_skill_from_markdown
-skill = await create_skill_from_markdown(uploaded_text, owner_id=user_id)
+from motoro.services.skill_service import create_skill_from_bundle
+# files is [(relative_path, text)], SKILL.md included, folder segment stripped
+skill = await create_skill_from_bundle(files, owner_id=user_id)
 await create_agent(..., skill_config={"skill_ids": [str(skill.id)]})
 ```
+
+`create_skill_from_markdown` remains for the one-file case, and
+`update_skill_from_bundle` replaces a bundle wholesale — it is a replacement,
+not a merge, so a re-upload that drops a file drops it from the skill.
 
 `skill_config` is the sixth agent capability axis, alongside `model_config`,
 `tool_config`, `memory_config`, `pattern_config`, and `output_contract`. It
@@ -415,6 +432,26 @@ body as a `role: "tool"` result (every issued call id must be answered) and
 returns `HookAction.SKIP_PHASE`. Since `act` is last in reason_act's phase
 sequence, that advances the iteration normally — and `context.max_iterations`
 still bounds a model that does nothing but open skills.
+
+**Level 3 is a second pseudo-tool, `read_skill_file`**, built the same way and
+intercepted in the same place. Its `path` enum is *skill-qualified*
+(`spinal-mri-qc/FORMS.md`) so two skills each bundling a `REFERENCE.md` stay
+distinguishable and the model has one argument to get right instead of two
+that must agree. It is bound only when some resolved skill actually has files
+— an empty `enum` is rejected outright by some providers, and merely useless
+in the rest. `resolve_skills` therefore loads bundle *contents* eagerly, not
+lazily: progressive disclosure is about what enters the context window, not
+about what the database read, and eager loading is what lets
+`engine.skills` stay pure functions with no session threaded through a
+pattern's turn loop. The per-bundle caps (`MAX_BUNDLE_FILES`,
+`MAX_BUNDLE_BYTES`) are what make that affordable.
+
+The inlining fallback **names bundled files but does not inline them**. With
+no tool loop there is no way to ask for one, the body will send the model to
+them regardless ("see FORMS.md"), and inlining a whole bundle into a prompt
+resent every turn is past what "expensive but correct" is worth — so the
+paths are listed and their unavailability is stated, rather than left for the
+model to discover mid-task or paper over by inventing contents.
 
 ## Resolution order for credentials
 

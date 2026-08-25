@@ -192,12 +192,107 @@ def test_render_quotes_a_description_that_would_break_yaml() -> None:
 
 
 # --------------------------------------------------------------------------- #
+#  Bundles — the directory form                                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_parses_a_directory_into_skill_md_and_its_bundled_files() -> None:
+    from motoro.services.skill_service import parse_skill_bundle
+
+    bundle = parse_skill_bundle(
+        [("SKILL.md", _VALID), ("FORMS.md", "form text"), ("references/schema.md", "schema text")]
+    )
+    assert bundle.skill.name == "spinal-mri-qc"
+    # Upload order preserved — it is the order the agent is shown the files in.
+    assert [p for p, _ in bundle.files] == ["FORMS.md", "references/schema.md"]
+
+
+def test_a_bundle_is_matched_case_insensitively_on_skill_md() -> None:
+    from motoro.services.skill_service import parse_skill_bundle
+
+    assert parse_skill_bundle([("skill.md", _VALID)]).skill.name == "spinal-mri-qc"
+
+
+def test_a_folder_with_no_skill_md_is_rejected() -> None:
+    from motoro.services.skill_service import SkillFormatError, parse_skill_bundle
+
+    with pytest.raises(SkillFormatError, match="no SKILL.md"):
+        parse_skill_bundle([("FORMS.md", "form text")])
+
+
+def test_a_bundled_script_is_rejected_with_the_reason() -> None:
+    from motoro.services.skill_service import SkillFormatError, parse_skill_bundle
+
+    # Not an oversight: there is no shell behind an MCP tool call, so accepting
+    # the file would mean storing something no run can ever reach.
+    with pytest.raises(SkillFormatError, match="MCP server"):
+        parse_skill_bundle([("SKILL.md", _VALID), ("scripts/fill_form.py", "print(1)")])
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/etc/passwd",
+        "../outside.md",
+        "references/../../outside.md",
+        ".git/config",
+        "notes/.hidden.md",
+    ],
+)
+def test_rejects_paths_that_escape_the_skill_directory(path: str) -> None:
+    from motoro.services.skill_service import SkillFormatError, validate_bundle_path
+
+    # ``lstrip("./")`` would silently normalise the first two of these into
+    # innocent-looking relative paths rather than rejecting them.
+    with pytest.raises(SkillFormatError):
+        validate_bundle_path(path)
+
+
+def test_normalises_a_leading_dot_slash_and_backslashes() -> None:
+    from motoro.services.skill_service import validate_bundle_path
+
+    assert validate_bundle_path("./FORMS.md") == "FORMS.md"
+    assert validate_bundle_path("references\\schema.md") == "references/schema.md"
+
+
+def test_rejects_a_non_text_asset() -> None:
+    from motoro.services.skill_service import SkillFormatError, validate_bundle_path
+
+    with pytest.raises(SkillFormatError, match="context window"):
+        validate_bundle_path("diagram.png")
+
+
+def test_rejects_the_same_path_twice_case_insensitively() -> None:
+    from motoro.services.skill_service import SkillFormatError, parse_skill_bundle
+
+    with pytest.raises(SkillFormatError, match="more than once"):
+        parse_skill_bundle([("SKILL.md", _VALID), ("FORMS.md", "a"), ("forms.md", "b")])
+
+
+def test_rejects_a_bundle_over_the_size_cap() -> None:
+    from motoro.services.skill_service import MAX_BUNDLE_BYTES, SkillFormatError, parse_skill_bundle
+
+    with pytest.raises(SkillFormatError, match="KB limit"):
+        parse_skill_bundle([("SKILL.md", _VALID), ("BIG.md", "x" * (MAX_BUNDLE_BYTES + 1))])
+
+
+# --------------------------------------------------------------------------- #
 #  Disclosure — index vs. inline                                               #
 # --------------------------------------------------------------------------- #
 
 
 _SKILLS = [
     {"name": "alpha", "description": "Does alpha things.", "body": "SECRET-ALPHA-BODY"},
+    {"name": "beta", "description": "Does beta things.", "body": "SECRET-BETA-BODY"},
+]
+
+_BUNDLED_SKILLS = [
+    {
+        "name": "alpha",
+        "description": "Does alpha things.",
+        "body": "SECRET-ALPHA-BODY, see FORMS.md",
+        "files": {"FORMS.md": "SECRET-FORMS-TEXT"},
+    },
     {"name": "beta", "description": "Does beta things.", "body": "SECRET-BETA-BODY"},
 ]
 
@@ -249,6 +344,67 @@ def test_inline_fallback_includes_every_body() -> None:
     assert prompt.startswith("You are a helper.")
     assert "SECRET-ALPHA-BODY" in prompt
     assert "SECRET-BETA-BODY" in prompt
+
+
+def test_the_index_never_carries_level_three_either() -> None:
+    from motoro.engine.skills import render_skill_index
+
+    # A bundled file is level 3; it must not leak into the always-loaded block.
+    assert "SECRET-FORMS-TEXT" not in render_skill_index(_BUNDLED_SKILLS)
+
+
+def test_read_skill_file_enum_is_qualified_by_skill_name() -> None:
+    from motoro.engine.skills import build_read_skill_file_tool, skill_file_paths
+
+    # Qualified so two skills each bundling a REFERENCE.md stay distinguishable.
+    assert skill_file_paths(_BUNDLED_SKILLS) == ["alpha/FORMS.md"]
+    tool = build_read_skill_file_tool(_BUNDLED_SKILLS)
+    assert tool["function"]["parameters"]["properties"]["path"]["enum"] == ["alpha/FORMS.md"]
+
+
+def test_read_skill_file_name_avoids_collisions_including_with_load_skill() -> None:
+    from motoro.engine.skills import resolve_read_skill_file_name
+
+    assert resolve_read_skill_file_name(set()) == "read_skill_file"
+    assert resolve_read_skill_file_name({"read_skill_file"}) == "read_skill_file_1"
+
+
+def test_the_body_lists_its_bundled_files_only_when_the_tool_is_bound() -> None:
+    from motoro.engine.skills import render_skill_body
+
+    # A markdown link is not a callable thing; the footer is what makes the
+    # reference actionable — and it is a lie if no tool is bound to act on it.
+    with_tool = render_skill_body(_BUNDLED_SKILLS, "alpha", file_tool_name="read_skill_file")
+    assert "alpha/FORMS.md" in with_tool and "read_skill_file" in with_tool
+    assert "SECRET-FORMS-TEXT" not in with_tool
+    assert "alpha/FORMS.md" not in render_skill_body(_BUNDLED_SKILLS, "alpha")
+
+
+def test_render_skill_file_returns_the_contents() -> None:
+    from motoro.engine.skills import render_skill_file
+
+    assert "SECRET-FORMS-TEXT" in render_skill_file(_BUNDLED_SKILLS, "alpha/FORMS.md")
+    # Case-insensitive, matching the storage-side uniqueness index.
+    assert "SECRET-FORMS-TEXT" in render_skill_file(_BUNDLED_SKILLS, "alpha/forms.md")
+
+
+def test_render_skill_file_answers_an_invented_path_instead_of_raising() -> None:
+    from motoro.engine.skills import render_skill_file
+
+    result = render_skill_file(_BUNDLED_SKILLS, "alpha/NOPE.md")
+    assert "No bundled file at 'alpha/NOPE.md'" in result
+    assert "alpha/FORMS.md" in result
+
+
+def test_inline_fallback_names_bundled_files_and_says_they_are_unavailable() -> None:
+    from motoro.engine.skills import inline_skills
+
+    # No tool loop means no way to ask for a file, and the body will send the
+    # model to one regardless — so say so rather than let it invent contents.
+    prompt = inline_skills("You are a helper.", _BUNDLED_SKILLS)
+    assert "FORMS.md" in prompt
+    assert "NOT" in prompt
+    assert "SECRET-FORMS-TEXT" not in prompt
 
 
 def test_reason_act_declares_that_it_consumes_skills() -> None:
@@ -304,7 +460,7 @@ class _FakeRuntime:
         self._db = None
 
 
-def _reason_act_context(llm: Any) -> Any:
+def _reason_act_context(llm: Any, skills: Any = None) -> Any:
     from motoro.engine.context import RunContext
     from motoro.schemas.agent import ModelConfig
     from motoro.schemas.llm import SenseOutput
@@ -315,7 +471,7 @@ def _reason_act_context(llm: Any) -> Any:
         system_prompt="You are a helper.",
         model_config=ModelConfig(),
         user_input="segment this",
-        skills=list(_SKILLS),
+        skills=list(_SKILLS if skills is None else skills),
     )
     context.record_phase_output(
         "sense",
@@ -405,6 +561,37 @@ async def test_no_skills_means_no_load_skill_tool() -> None:
     assert "load_skill" not in llm.bound_tool_names[0]
 
 
+async def test_no_bundled_files_means_no_read_skill_file_tool() -> None:
+    # An empty enum is worse than no tool: some providers reject the schema
+    # outright, and the rest hand the model an affordance it cannot use.
+    llm = _ScriptedLLM(_completion("Done.", _tool_call("c1", "final_answer", {"answer": "ok"})))
+    await _pre_act(_reason_act_context(llm), llm)
+
+    assert "load_skill" in llm.bound_tool_names[0]
+    assert "read_skill_file" not in llm.bound_tool_names[0]
+
+
+async def test_a_bundled_file_turn_is_answered_without_reaching_act() -> None:
+    from motoro.engine.patterns.base import HookAction
+    from motoro.engine.patterns.builtin.reason_act import _KEY_MESSAGES, _KEY_PENDING_CALLS
+
+    llm = _ScriptedLLM(
+        _completion("Reading the form reference.", _tool_call("c1", "read_skill_file", {"path": "alpha/FORMS.md"}))
+    )
+    context = _reason_act_context(llm, _BUNDLED_SKILLS)
+
+    action = await _pre_act(context, llm)
+
+    # Same device as load_skill: intercepted by name, never dispatched.
+    assert action is HookAction.SKIP_PHASE
+    assert not context.metadata.get(_KEY_PENDING_CALLS)
+    answer = context.metadata[_KEY_MESSAGES][-1]
+    assert answer["tool_call_id"] == "c1"
+    assert "SECRET-FORMS-TEXT" in answer["content"]
+
+    assert "read_skill_file" in llm.bound_tool_names[0]
+
+
 # --------------------------------------------------------------------------- #
 #  Config reading / resolution                                                 #
 # --------------------------------------------------------------------------- #
@@ -437,6 +624,38 @@ async def test_create_list_and_resolve_preserves_declared_order() -> None:
     resolved = await resolve_skills({"skill_ids": [second.id, first.id]}, owner_id=owner)
     assert [s["name"] for s in resolved] == ["cord-segmentation", "spinal-mri-qc"]
     assert resolved[0]["body"].startswith("# Spinal MRI QC")
+
+
+@needs_db
+async def test_a_bundle_round_trips_into_resolve_skills() -> None:
+    from motoro.services.skill_service import bundle_paths, create_skill_from_bundle, resolve_skills
+
+    owner = uuid.uuid4()
+    skill = await create_skill_from_bundle(
+        [("SKILL.md", _VALID), ("FORMS.md", "form text"), ("references/schema.md", "schema text")],
+        owner_id=owner,
+    )
+    assert bundle_paths(skill) == ["FORMS.md", "references/schema.md"]
+
+    # Contents come back eagerly: engine.skills is pure functions with no
+    # session to lazy-load through mid-turn.
+    resolved = await resolve_skills({"skill_ids": [skill.id]}, owner_id=owner)
+    assert resolved[0]["files"] == {"FORMS.md": "form text", "references/schema.md": "schema text"}
+
+
+@needs_db
+async def test_updating_a_bundle_replaces_it_rather_than_merging() -> None:
+    from motoro.services.skill_service import bundle_paths, create_skill_from_bundle, update_skill_from_bundle
+
+    owner = uuid.uuid4()
+    skill = await create_skill_from_bundle(
+        [("SKILL.md", _VALID), ("FORMS.md", "form text"), ("OLD.md", "gone")], owner_id=owner
+    )
+    # A re-upload that drops a file must drop it — a merge would leave the
+    # skill pointing at documents the author deliberately removed.
+    updated = await update_skill_from_bundle(skill.id, [("SKILL.md", _VALID), ("FORMS.md", "new text")])
+    assert updated is not None
+    assert bundle_paths(updated) == ["FORMS.md"]
 
 
 @needs_db
