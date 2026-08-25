@@ -14,6 +14,8 @@ import sqlalchemy as sa
 from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
 
+from motoro.migrations.guards import enum_type
+
 revision: str = "77caa6d3da02"
 down_revision: str | None = "c58058956d24"
 branch_labels: str | Sequence[str] | None = None
@@ -29,7 +31,7 @@ def upgrade() -> None:
         sa.Column("run_id", sa.UUID(), nullable=True),
         sa.Column(
             "type",
-            sa.Enum("episodic", "semantic", name="memory_type", create_constraint=True),
+            enum_type("memory_type", "episodic", "semantic"),
             nullable=False,
         ),
         sa.Column("content", sa.Text(), nullable=False),
@@ -44,21 +46,22 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(["agent_id"], ["agents.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["run_id"], ["agent_runs.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
+        if_not_exists=True,
     )
-    op.create_index("ix_memory_entries_agent_id", "memory_entries", ["agent_id"], unique=False)
-    op.create_index("ix_memory_entries_type", "memory_entries", ["type"], unique=False)
-    op.create_index("ix_memory_entries_run_id", "memory_entries", ["run_id"], unique=False)
-    op.create_index("ix_memory_entries_embedding_model", "memory_entries", ["embedding_model"], unique=False)
-    op.create_index("ix_memory_entries_meta_gin", "memory_entries", ["metadata"], unique=False, postgresql_using="gin")
+    op.create_index("ix_memory_entries_agent_id", "memory_entries", ["agent_id"], unique=False, if_not_exists=True)
+    op.create_index("ix_memory_entries_type", "memory_entries", ["type"], unique=False, if_not_exists=True)
+    op.create_index("ix_memory_entries_run_id", "memory_entries", ["run_id"], unique=False, if_not_exists=True)
+    op.create_index("ix_memory_entries_embedding_model", "memory_entries", ["embedding_model"], unique=False, if_not_exists=True)
+    op.create_index("ix_memory_entries_meta_gin", "memory_entries", ["metadata"], unique=False, postgresql_using="gin", if_not_exists=True)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_memory_entries_meta_gin", table_name="memory_entries")
-    op.drop_index("ix_memory_entries_embedding_model", table_name="memory_entries")
-    op.drop_index("ix_memory_entries_run_id", table_name="memory_entries")
-    op.drop_index("ix_memory_entries_type", table_name="memory_entries")
-    op.drop_index("ix_memory_entries_agent_id", table_name="memory_entries")
-    op.drop_table("memory_entries")
+    op.drop_index("ix_memory_entries_meta_gin", table_name="memory_entries", if_exists=True)
+    op.drop_index("ix_memory_entries_embedding_model", table_name="memory_entries", if_exists=True)
+    op.drop_index("ix_memory_entries_run_id", table_name="memory_entries", if_exists=True)
+    op.drop_index("ix_memory_entries_type", table_name="memory_entries", if_exists=True)
+    op.drop_index("ix_memory_entries_agent_id", table_name="memory_entries", if_exists=True)
+    op.drop_table("memory_entries", if_exists=True)
 
     # Autogenerate emits CREATE TYPE for a native enum but never the matching
     # DROP TYPE — see c58058956d24's downgrade for the same fix and why it is

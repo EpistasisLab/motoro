@@ -13,6 +13,8 @@ from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
 
+from motoro.migrations.guards import enum_type
+
 revision: str = "ac5e1e11d56e"
 down_revision: str | None = "77caa6d3da02"
 branch_labels: str | Sequence[str] | None = None
@@ -26,7 +28,7 @@ def upgrade() -> None:
         sa.Column("name", sa.String(length=255), nullable=False),
         sa.Column(
             "transport",
-            sa.Enum("stdio", "http", "sse", name="mcp_transport", create_constraint=True),
+            enum_type("mcp_transport", "stdio", "http", "sse"),
             nullable=False,
         ),
         sa.Column("command", sa.Text(), nullable=True),
@@ -34,7 +36,7 @@ def upgrade() -> None:
         sa.Column("capabilities", postgresql.JSON(astext_type=sa.Text()), nullable=True),
         sa.Column(
             "status",
-            sa.Enum("connected", "disconnected", "error", name="mcp_server_status", create_constraint=True),
+            enum_type("mcp_server_status", "connected", "disconnected", "error"),
             nullable=False,
         ),
         sa.Column("headers_encrypted", sa.Text(), nullable=True),
@@ -45,13 +47,14 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("name"),
+        if_not_exists=True,
     )
-    op.create_index("ix_mcp_server_configs_owner_id", "mcp_server_configs", ["owner_id"], unique=False)
+    op.create_index("ix_mcp_server_configs_owner_id", "mcp_server_configs", ["owner_id"], unique=False, if_not_exists=True)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_mcp_server_configs_owner_id", table_name="mcp_server_configs")
-    op.drop_table("mcp_server_configs")
+    op.drop_index("ix_mcp_server_configs_owner_id", table_name="mcp_server_configs", if_exists=True)
+    op.drop_table("mcp_server_configs", if_exists=True)
 
     # See c58058956d24's downgrade for why: autogenerate emits CREATE TYPE for a
     # native enum but never the matching DROP TYPE.

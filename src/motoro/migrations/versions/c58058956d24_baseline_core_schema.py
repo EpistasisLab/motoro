@@ -12,6 +12,8 @@ from collections.abc import Sequence
 from alembic import op
 import sqlalchemy as sa
 from sqlalchemy.dialects import postgresql
+
+from motoro.migrations.guards import enum_type
 revision: str = 'c58058956d24'
 down_revision: str | None = None
 branch_labels: str | Sequence[str] | None = None
@@ -40,17 +42,18 @@ def upgrade() -> None:
     sa.Column('max_run_duration_seconds', sa.Integer(), nullable=True),
     sa.Column('auto_eval_enabled', sa.Boolean(), server_default='true', nullable=False),
     sa.Column('auto_eval_model', sa.String(length=100), nullable=True),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    if_not_exists=True,
     )
-    op.create_index(op.f('ix_agents_owner_id'), 'agents', ['owner_id'], unique=False)
-    op.create_index('uq_agents_name_active', 'agents', [sa.literal_column('lower(name)')], unique=True, postgresql_where=sa.text('deleted_at IS NULL'))
+    op.create_index(op.f('ix_agents_owner_id'), 'agents', ['owner_id'], unique=False, if_not_exists=True)
+    op.create_index('uq_agents_name_active', 'agents', [sa.literal_column('lower(name)')], unique=True, postgresql_where=sa.text('deleted_at IS NULL'), if_not_exists=True)
     op.create_table('architectural_patterns',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('slug', sa.String(length=128), nullable=False),
     sa.Column('name', sa.String(length=255), nullable=False),
-    sa.Column('category', sa.Enum('execution', 'safety', 'coordination', 'knowledge', 'quality', 'routing', 'resolution', name='pattern_category', create_constraint=True), nullable=False),
+    sa.Column('category', enum_type('pattern_category', 'execution', 'safety', 'coordination', 'knowledge', 'quality', 'routing', 'resolution'), nullable=False),
     sa.Column('description', sa.Text(), nullable=False),
-    sa.Column('phase', sa.Enum('basic', 'dynamic', 'introspective', 'self_correcting', 'multi_agent', 'advanced_multi_agent', name='pattern_phase', create_constraint=True), nullable=False),
+    sa.Column('phase', enum_type('pattern_phase', 'basic', 'dynamic', 'introspective', 'self_correcting', 'multi_agent', 'advanced_multi_agent'), nullable=False),
     sa.Column('configuration_schema', postgresql.JSON(astext_type=sa.Text()), nullable=False),
     sa.Column('requires_multi_agent', sa.Boolean(), nullable=False),
     sa.Column('dependencies', postgresql.ARRAY(sa.String()), nullable=False),
@@ -58,12 +61,13 @@ def upgrade() -> None:
     sa.Column('is_implemented', sa.Boolean(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    if_not_exists=True,
     )
-    op.create_index(op.f('ix_architectural_patterns_category'), 'architectural_patterns', ['category'], unique=False)
-    op.create_index(op.f('ix_architectural_patterns_is_implemented'), 'architectural_patterns', ['is_implemented'], unique=False)
-    op.create_index(op.f('ix_architectural_patterns_phase'), 'architectural_patterns', ['phase'], unique=False)
-    op.create_index(op.f('ix_architectural_patterns_slug'), 'architectural_patterns', ['slug'], unique=True)
+    op.create_index(op.f('ix_architectural_patterns_category'), 'architectural_patterns', ['category'], unique=False, if_not_exists=True)
+    op.create_index(op.f('ix_architectural_patterns_is_implemented'), 'architectural_patterns', ['is_implemented'], unique=False, if_not_exists=True)
+    op.create_index(op.f('ix_architectural_patterns_phase'), 'architectural_patterns', ['phase'], unique=False, if_not_exists=True)
+    op.create_index(op.f('ix_architectural_patterns_slug'), 'architectural_patterns', ['slug'], unique=True, if_not_exists=True)
     op.create_table('llm_pricing_overrides',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('model_name', sa.String(length=255), nullable=False),
@@ -74,12 +78,13 @@ def upgrade() -> None:
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.PrimaryKeyConstraint('id'),
-    sa.UniqueConstraint('model_name')
+    sa.UniqueConstraint('model_name'),
+    if_not_exists=True,
     )
     op.create_table('agent_runs',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('agent_id', sa.UUID(), nullable=False),
-    sa.Column('status', sa.Enum('pending', 'running', 'completed', 'failed', 'cancelled', 'paused', 'awaiting_human', name='run_status', create_constraint=True), nullable=False),
+    sa.Column('status', enum_type('run_status', 'pending', 'running', 'completed', 'failed', 'cancelled', 'paused', 'awaiting_human'), nullable=False),
     sa.Column('input', sa.Text(), nullable=False),
     sa.Column('output', sa.Text(), nullable=True),
     sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
@@ -96,17 +101,18 @@ def upgrade() -> None:
     sa.Column('owner_id', sa.UUID(), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['agent_id'], ['agents.id'], ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    if_not_exists=True,
     )
-    op.create_index('ix_agent_runs_agent_id', 'agent_runs', ['agent_id'], unique=False)
-    op.create_index(op.f('ix_agent_runs_owner_id'), 'agent_runs', ['owner_id'], unique=False)
-    op.create_index('ix_agent_runs_status', 'agent_runs', ['status'], unique=False)
+    op.create_index('ix_agent_runs_agent_id', 'agent_runs', ['agent_id'], unique=False, if_not_exists=True)
+    op.create_index(op.f('ix_agent_runs_owner_id'), 'agent_runs', ['owner_id'], unique=False, if_not_exists=True)
+    op.create_index('ix_agent_runs_status', 'agent_runs', ['status'], unique=False, if_not_exists=True)
     op.create_table('run_steps',
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('run_id', sa.UUID(), nullable=False),
     sa.Column('sequence', sa.Integer(), nullable=False),
     sa.Column('iteration', sa.Integer(), nullable=True),
-    sa.Column('phase', sa.Enum('sense', 'reason', 'plan', 'act', 'hitl', name='step_phase', create_constraint=True), nullable=False),
+    sa.Column('phase', enum_type('step_phase', 'sense', 'reason', 'plan', 'act', 'hitl'), nullable=False),
     sa.Column('input_data', postgresql.JSON(astext_type=sa.Text()), nullable=True),
     sa.Column('output_data', postgresql.JSON(astext_type=sa.Text()), nullable=True),
     sa.Column('llm_call', postgresql.JSON(astext_type=sa.Text()), nullable=True),
@@ -114,29 +120,30 @@ def upgrade() -> None:
     sa.Column('started_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('completed_at', sa.DateTime(timezone=True), nullable=True),
     sa.ForeignKeyConstraint(['run_id'], ['agent_runs.id'], ondelete='CASCADE'),
-    sa.PrimaryKeyConstraint('id')
+    sa.PrimaryKeyConstraint('id'),
+    if_not_exists=True,
     )
-    op.create_index('ix_run_steps_run_id', 'run_steps', ['run_id'], unique=False)
+    op.create_index('ix_run_steps_run_id', 'run_steps', ['run_id'], unique=False, if_not_exists=True)
     # ### end Alembic commands ###
 
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index('ix_run_steps_run_id', table_name='run_steps')
-    op.drop_table('run_steps')
-    op.drop_index('ix_agent_runs_status', table_name='agent_runs')
-    op.drop_index(op.f('ix_agent_runs_owner_id'), table_name='agent_runs')
-    op.drop_index('ix_agent_runs_agent_id', table_name='agent_runs')
-    op.drop_table('agent_runs')
-    op.drop_table('llm_pricing_overrides')
-    op.drop_index(op.f('ix_architectural_patterns_slug'), table_name='architectural_patterns')
-    op.drop_index(op.f('ix_architectural_patterns_phase'), table_name='architectural_patterns')
-    op.drop_index(op.f('ix_architectural_patterns_is_implemented'), table_name='architectural_patterns')
-    op.drop_index(op.f('ix_architectural_patterns_category'), table_name='architectural_patterns')
-    op.drop_table('architectural_patterns')
-    op.drop_index('uq_agents_name_active', table_name='agents', postgresql_where=sa.text('deleted_at IS NULL'))
-    op.drop_index(op.f('ix_agents_owner_id'), table_name='agents')
-    op.drop_table('agents')
+    op.drop_index('ix_run_steps_run_id', table_name='run_steps', if_exists=True)
+    op.drop_table('run_steps', if_exists=True)
+    op.drop_index('ix_agent_runs_status', table_name='agent_runs', if_exists=True)
+    op.drop_index(op.f('ix_agent_runs_owner_id'), table_name='agent_runs', if_exists=True)
+    op.drop_index('ix_agent_runs_agent_id', table_name='agent_runs', if_exists=True)
+    op.drop_table('agent_runs', if_exists=True)
+    op.drop_table('llm_pricing_overrides', if_exists=True)
+    op.drop_index(op.f('ix_architectural_patterns_slug'), table_name='architectural_patterns', if_exists=True)
+    op.drop_index(op.f('ix_architectural_patterns_phase'), table_name='architectural_patterns', if_exists=True)
+    op.drop_index(op.f('ix_architectural_patterns_is_implemented'), table_name='architectural_patterns', if_exists=True)
+    op.drop_index(op.f('ix_architectural_patterns_category'), table_name='architectural_patterns', if_exists=True)
+    op.drop_table('architectural_patterns', if_exists=True)
+    op.drop_index('uq_agents_name_active', table_name='agents', postgresql_where=sa.text('deleted_at IS NULL'), if_exists=True)
+    op.drop_index(op.f('ix_agents_owner_id'), table_name='agents', if_exists=True)
+    op.drop_table('agents', if_exists=True)
     # ### end Alembic commands ###
 
     # Hand-added: autogenerate emits CREATE TYPE for a native enum but never the

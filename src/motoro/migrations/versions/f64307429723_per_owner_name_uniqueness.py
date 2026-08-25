@@ -39,22 +39,24 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
-    op.drop_index("uq_agents_name_active", table_name="agents", postgresql_where=sa.text("deleted_at IS NULL"))
+    op.drop_index("uq_agents_name_active", table_name="agents", postgresql_where=sa.text("deleted_at IS NULL"), if_exists=True)
     op.create_index(
         "uq_agents_owner_name_active",
         "agents",
         ["owner_id", sa.literal_column("lower(name)")],
         unique=True,
         postgresql_where=sa.text("deleted_at IS NULL"),
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index("uq_agents_owner_name_active", table_name="agents", postgresql_where=sa.text("deleted_at IS NULL"))
+    op.drop_index("uq_agents_owner_name_active", table_name="agents", postgresql_where=sa.text("deleted_at IS NULL"), if_exists=True)
     op.create_index(
         "uq_agents_name_active",
         "agents",
         [sa.literal_column("lower(name)")],
         unique=True,
         postgresql_where=sa.text("deleted_at IS NULL"),
+        if_not_exists=True,
     )

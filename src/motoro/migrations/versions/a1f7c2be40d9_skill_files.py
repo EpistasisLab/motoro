@@ -29,8 +29,9 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["skill_id"], ["skills.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
+        if_not_exists=True,
     )
-    op.create_index("ix_skill_files_skill_id", "skill_files", ["skill_id"], unique=False)
+    op.create_index("ix_skill_files_skill_id", "skill_files", ["skill_id"], unique=False, if_not_exists=True)
     # Case-insensitive per skill: the model addresses a bundled file by typing
     # its path into read_skill_file, so a bundle holding both FORMS.md and
     # forms.md would make the resolution depend on row order.
@@ -39,10 +40,11 @@ def upgrade() -> None:
         "skill_files",
         ["skill_id", sa.text("lower(path)")],
         unique=True,
+        if_not_exists=True,
     )
 
 
 def downgrade() -> None:
-    op.drop_index("uq_skill_files_skill_path", table_name="skill_files")
-    op.drop_index("ix_skill_files_skill_id", table_name="skill_files")
-    op.drop_table("skill_files")
+    op.drop_index("uq_skill_files_skill_path", table_name="skill_files", if_exists=True)
+    op.drop_index("ix_skill_files_skill_id", table_name="skill_files", if_exists=True)
+    op.drop_table("skill_files", if_exists=True)
