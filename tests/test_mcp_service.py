@@ -45,6 +45,11 @@ needs_db = pytest.mark.skipif(not DB_URL, reason="MOTORO_TEST_DATABASE_URL is no
 
 _FIXTURE_SERVER = Path(__file__).parent / "fixtures" / "echo_mcp_server.py"
 _ECHO_COMMAND = f"{sys.executable} {_FIXTURE_SERVER}"
+# Kept in step with the fixture's own INSTRUCTIONS rather than duplicated, so
+# editing the fixture's blurb can't silently stop the assertions meaning
+# anything.
+sys.path.insert(0, str(_FIXTURE_SERVER.parent))
+from echo_mcp_server import INSTRUCTIONS as _ECHO_INSTRUCTIONS  # noqa: E402
 
 # Every call that touches a live subprocess is bounded, so a regression like the
 # one this file exists to catch fails the test instead of hanging the suite.
@@ -233,6 +238,10 @@ async def test_register_server_connects_and_persists() -> None:
         assert config.status.value == "connected"
         assert config.capabilities is not None
         assert {t["name"] for t in config.capabilities["tools"]} >= {"echo", "reset_session"}
+        # The server's own `instructions`, captured from the initialize
+        # handshake and stored alongside the tools -- a server-level
+        # description has nowhere else to live, there being no column for one.
+        assert config.capabilities["instructions"] == _ECHO_INSTRUCTIONS
         assert config.owner_id is None
     finally:
         await registry.disconnect_all()
@@ -447,6 +456,9 @@ async def test_refresh_server_rediscovers_tools() -> None:
         refreshed = await _with_timeout(refresh_server(config.id, registry=registry))
         assert refreshed.status.value == "connected"
         assert {t["name"] for t in refreshed.capabilities["tools"]} >= {"echo", "reset_session"}
+        # list_tools never repeats `instructions`, so a refresh has to carry
+        # forward what connect() captured rather than dropping the key.
+        assert refreshed.capabilities["instructions"] == _ECHO_INSTRUCTIONS
     finally:
         await registry.disconnect_all()
 
@@ -621,5 +633,9 @@ async def test_live_connect_completes_within_a_bounded_timeout() -> None:
     try:
         assert client.connected
         assert {t.name for t in client.tools} >= {"echo", "reset_session"}
+        assert client.instructions == _ECHO_INSTRUCTIONS
     finally:
         await _with_timeout(client.disconnect())
+    # Cleared on disconnect alongside the tool list: neither survives the
+    # session that produced it.
+    assert client.instructions == ""

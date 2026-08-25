@@ -156,6 +156,12 @@ class MCPClient:
         self._headers = headers or {}
         self._server_env = server_env
         self._tools: list[ToolInfo] = []
+        # The server's own ``instructions`` from the initialize handshake --
+        # its description of itself, as distinct from any per-tool
+        # description. Captured once at connect because that is the only
+        # place the protocol offers it: ``list_tools`` never repeats it, so
+        # ``refresh_tools`` leaves this alone.
+        self._instructions: str = ""
         self._session: ClientSession | None = None
         self._read: Any = None
         self._write: Any = None
@@ -191,6 +197,16 @@ class MCPClient:
     def tools(self) -> list[ToolInfo]:
         return list(self._tools)
 
+    @property
+    def instructions(self) -> str:
+        """What the server says it is, from the initialize handshake.
+
+        Empty when the server sends none -- it is an optional field, and most
+        servers omit it. Callers should treat "" as "this server has no
+        description" rather than as an error.
+        """
+        return self._instructions
+
     async def connect(self) -> None:
         """Connect to the MCP server, initialize, and discover tools.
 
@@ -218,7 +234,8 @@ class MCPClient:
         # ``notifications/tools/list_changed`` to us (Issue #721).
         self._session_cm = ClientSession(self._read, self._write, message_handler=self._handle_session_message)
         self._session = await self._session_cm.__aenter__()
-        await self._session.initialize()
+        init = await self._session.initialize()
+        self._instructions = (getattr(init, "instructions", None) or "").strip()
 
         result = await self._session.list_tools()
         self._tools = [
@@ -659,6 +676,7 @@ class MCPClient:
             self._http_client = None
             self._connected = False
             self._tools = []
+            self._instructions = ""
             self._is_alive_last_checked = 0.0
             self._is_alive_last_result = False
             self._log.info(

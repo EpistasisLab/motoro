@@ -67,6 +67,29 @@ def _decrypt_headers(encrypted: str | None) -> dict[str, str] | None:
         return None
 
 
+def _capabilities_for(client: Any) -> dict[str, Any] | None:
+    """The ``capabilities`` blob for a connected client, or ``None`` if it told us nothing.
+
+    Two things the server describes about itself, and both belong here rather
+    than in columns of their own: the tool list, and ``instructions`` — the
+    server's own account of what it is, sent once during the initialize
+    handshake. A server-level description is exactly the sort of thing that
+    varies by protocol version, so it lives in the same JSON blob the tool
+    schemas do.
+
+    ``instructions`` is optional in MCP and most servers omit it, so the key
+    is left out entirely rather than written as ``""`` — a caller can then
+    treat "absent" and "this row predates instructions being captured" the
+    same way, which is what an older row will look like until it is
+    refreshed.
+    """
+    tools_data = [{"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in client.tools]
+    instructions = getattr(client, "instructions", "") or ""
+    if not tools_data and not instructions:
+        return None
+    return {"tools": tools_data, **({"instructions": instructions} if instructions else {})}
+
+
 def _validate_registration(transport: str, command: str | None, url: str | None) -> None:
     """The two checks a registration must pass before anything is spawned or dialed.
 
@@ -112,19 +135,13 @@ async def register_server(
     tp = TransportType(transport)
     entry = await reg.register(name=name, transport=tp, command=command, url=url, headers=headers)
 
-    tools_data = None
-    if entry.client.connected:
-        tools_data = [
-            {"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in entry.client.tools
-        ]
-
     config = MCPServerConfig(
         name=name,
         transport=MCPTransport(transport),
         command=command,
         url=url,
         headers_encrypted=_encrypt_headers(headers),
-        capabilities={"tools": tools_data} if tools_data else None,
+        capabilities=_capabilities_for(entry.client) if entry.client.connected else None,
         status=MCPServerStatus.CONNECTED if entry.client.connected else MCPServerStatus.ERROR,
         error_message=entry.error,
         owner_id=owner_id,
@@ -187,10 +204,7 @@ async def _persist_connection_outcome(
         config.status = MCPServerStatus.ERROR
         config.error_message = "Server not found in registry"
     elif entry.client.connected:
-        tools_data = [
-            {"name": t.name, "description": t.description, "input_schema": t.input_schema} for t in entry.client.tools
-        ]
-        config.capabilities = {"tools": tools_data}
+        config.capabilities = _capabilities_for(entry.client) or {"tools": []}
         config.status = MCPServerStatus.CONNECTED
         config.error_message = entry.error if refresh_only else None
     else:

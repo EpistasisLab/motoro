@@ -14,7 +14,14 @@ from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
 
-mcp = FastMCP("echo-test-server")
+# The server's own description of itself, sent once during the initialize
+# handshake -- distinct from the per-tool descriptions below. Set here so the
+# tests have something to assert MCPClient captured and mcp_service persisted.
+# It is optional in MCP, and a server that omits it is what the empty-string
+# default covers.
+INSTRUCTIONS = "A test server that echoes text back. Not useful for anything else."
+
+mcp = FastMCP("echo-test-server", instructions=INSTRUCTIONS)
 
 
 @mcp.tool()
