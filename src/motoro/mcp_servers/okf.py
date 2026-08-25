@@ -50,7 +50,7 @@ import os
 import re
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -72,6 +72,42 @@ _RESERVED_ROOT_STEMS = {"index", "log"}
 _ATTESTED_COMPUTATION_LOCKED_FIELDS = ("parameters", "runtime", "executor", "attester")
 _MARKDOWN_LINK_RE = re.compile(r"\]\(([^)\s]+)\)")
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?\n)---\s*\n?(.*)\Z", re.S)
+
+
+# --------------------------------------------------------------------------- #
+#  JSON encoding
+# --------------------------------------------------------------------------- #
+
+
+def _json_default(value: Any) -> str:
+    """Render what YAML parses natively but JSON has no type for.
+
+    Frontmatter is YAML, and YAML resolves an unquoted ``2026-08-25T16:00:00Z``
+    to a real ``datetime`` — so a hand-authored bundle whose ``generated.at``
+    (or ``verified[].at``, or a date-valued field of its own) isn't quoted hands
+    :func:`_dumps` an object ``json.dumps`` refuses, and the whole tool call
+    fails with "Object of type datetime is not JSON serializable" instead of
+    returning the concepts. A bundle written *by* this server never trips it —
+    it stamps ``at`` as an ISO string, which ``yaml.safe_dump`` quotes — so this
+    is specifically about bundles authored elsewhere, which the spec's
+    "continuously written and maintained" tree is full of.
+
+    ISO 8601 rather than ``str``, so a date read back out matches the form this
+    server writes (``datetime.now(UTC).isoformat()``) instead of YAML's
+    space-separated ``str(datetime)``. Anything else unexpected degrades to
+    ``str`` — a read of an odd frontmatter value should return something the
+    model can use, not fail.
+    """
+    if isinstance(value, datetime | date | time):
+        return value.isoformat()
+    return str(value)
+
+
+def _dumps(payload: Any) -> str:
+    """Serialize a tool result. Every tool returns through here, so a
+    JSON-hostile frontmatter value can't fail one tool and not its neighbour —
+    see :func:`_json_default`."""
+    return json.dumps(payload, default=_json_default)
 
 
 class OKFError(Exception):
@@ -247,7 +283,7 @@ def list_concepts(type: str = "", tags: str = "", verified_only: bool = False) -
     try:
         root = _bundle_root()
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     wanted_tags = {t.strip() for t in tags.split(",") if t.strip()}
     results = []
     for path in _iter_concept_files(root):
@@ -273,7 +309,7 @@ def list_concepts(type: str = "", tags: str = "", verified_only: bool = False) -
                 "status": fm.get("status"),
             }
         )
-    return json.dumps({"concepts": results, "count": len(results)})
+    return _dumps({"concepts": results, "count": len(results)})
 
 
 @mcp.tool()
@@ -288,10 +324,10 @@ def search_concepts(query: str, type: str = "") -> str:
     try:
         root = _bundle_root()
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     q = query.strip().lower()
     if not q:
-        return json.dumps({"error": "query must not be empty"})
+        return _dumps({"error": "query must not be empty"})
     results = []
     for path in _iter_concept_files(root):
         try:
@@ -310,7 +346,7 @@ def search_concepts(query: str, type: str = "") -> str:
                     "tags": sorted(fm.get("tags") or []),
                 }
             )
-    return json.dumps({"concepts": results, "count": len(results)})
+    return _dumps({"concepts": results, "count": len(results)})
 
 
 @mcp.tool()
@@ -326,9 +362,9 @@ def get_concept(id: str) -> str:
         path = _resolve_path(root, id, suffix=".md", must_exist=True)
         frontmatter, body = _parse_concept_file(path)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     links = sorted(set(_MARKDOWN_LINK_RE.findall(body)))
-    return json.dumps({**frontmatter, "id": id, "body": body, "links": links}, default=str)
+    return _dumps({**frontmatter, "id": id, "body": body, "links": links})
 
 
 # --------------------------------------------------------------------------- #
@@ -362,11 +398,11 @@ def create_concept(
         root = _bundle_root()
         concept_path = _resolve_path(root, path, suffix=".md")
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     actor = _actor_from_ctx(ctx)
     with _mutate_lock(root, path):
         if concept_path.exists():
-            return json.dumps({"error": f"concept already exists at {path!r}; use update_concept"})
+            return _dumps({"error": f"concept already exists at {path!r}; use update_concept"})
         frontmatter: dict[str, Any] = {
             "type": type,
             "title": title,
@@ -378,7 +414,7 @@ def create_concept(
             frontmatter["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
         _write_concept_file(concept_path, frontmatter, body)
         _append_log(root, "Creation", path, actor)
-    return json.dumps({"id": path, "created": True, "generated": frontmatter["generated"]})
+    return _dumps({"id": path, "created": True, "generated": frontmatter["generated"]})
 
 
 @mcp.tool()
@@ -407,7 +443,7 @@ def update_concept(
         root = _bundle_root()
         concept_path = _resolve_path(root, id, suffix=".md", must_exist=True)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     fields = fields or {}
     actor = _actor_from_ctx(ctx)
     # The read, the attester guard, and the write must all happen inside one
@@ -418,11 +454,11 @@ def update_concept(
         try:
             frontmatter, current_body = _parse_concept_file(concept_path)
         except OKFError as e:
-            return json.dumps({"error": str(e)})
+            return _dumps({"error": str(e)})
         if frontmatter.get("attester"):
             touched = [f for f in _ATTESTED_COMPUTATION_LOCKED_FIELDS if f in fields]
             if touched:
-                return json.dumps(
+                return _dumps(
                     {
                         "error": f"{id!r} is an attested computation; {touched} may not be edited "
                         "directly — use supply_computation_value to supply parameter values instead."
@@ -433,7 +469,7 @@ def update_concept(
         new_body = body if body is not None else (current_body + append_body if append_body else current_body)
         _write_concept_file(concept_path, frontmatter, new_body)
         _append_log(root, "Update", id, actor)
-    return json.dumps({"id": id, "updated": True, "generated": frontmatter["generated"]})
+    return _dumps({"id": id, "updated": True, "generated": frontmatter["generated"]})
 
 
 @mcp.tool()
@@ -450,13 +486,13 @@ def mark_verified(id: str, note: str = "", ctx: Context[Any, Any, Any] | None = 
         root = _bundle_root()
         concept_path = _resolve_path(root, id, suffix=".md", must_exist=True)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     actor = _actor_from_ctx(ctx)
     with _mutate_lock(root, id):
         try:
             frontmatter, body = _parse_concept_file(concept_path)
         except OKFError as e:
-            return json.dumps({"error": str(e)})
+            return _dumps({"error": str(e)})
         entry = {"by": actor, "at": datetime.now(UTC).isoformat()}
         existing = frontmatter.get("verified")
         if existing is None:
@@ -467,7 +503,7 @@ def mark_verified(id: str, note: str = "", ctx: Context[Any, Any, Any] | None = 
             frontmatter["verified"] = [existing, entry]
         _write_concept_file(concept_path, frontmatter, body)
         _append_log(root, "Update", id, actor, note or "verified")
-    return json.dumps({"id": id, "verified": frontmatter["verified"]})
+    return _dumps({"id": id, "verified": frontmatter["verified"]})
 
 
 @mcp.tool()
@@ -489,17 +525,17 @@ def supply_computation_value(
         root = _bundle_root()
         concept_path = _resolve_path(root, id, suffix=".md", must_exist=True)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     actor = _actor_from_ctx(ctx)
     with _mutate_lock(root, id):
         try:
             frontmatter, body = _parse_concept_file(concept_path)
         except OKFError as e:
-            return json.dumps({"error": str(e)})
+            return _dumps({"error": str(e)})
         declared = frontmatter.get("parameters") or []
         declared_names = {p.get("name") if isinstance(p, dict) else p for p in declared}
         if parameter not in declared_names:
-            return json.dumps(
+            return _dumps(
                 {
                     "error": f"{parameter!r} is not a declared parameter of {id!r}; "
                     f"expected one of {sorted(n for n in declared_names if n)}"
@@ -511,7 +547,7 @@ def supply_computation_value(
         frontmatter["generated"] = {"by": actor, "at": datetime.now(UTC).isoformat()}
         _write_concept_file(concept_path, frontmatter, body)
         _append_log(root, "Update", id, actor, f"supplied value for parameter {parameter!r}")
-    return json.dumps({"id": id, "parameter": parameter, "values": frontmatter["values"]})
+    return _dumps({"id": id, "parameter": parameter, "values": frontmatter["values"]})
 
 
 # --------------------------------------------------------------------------- #
@@ -535,12 +571,12 @@ def get_reference(ref_path: str) -> str:
         root = _bundle_root()
         path = _resolve_reference_path(root, ref_path, must_exist=True)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     raw = path.read_bytes()
     try:
-        return json.dumps({"encoding": "text", "content": raw.decode("utf-8")})
+        return _dumps({"encoding": "text", "content": raw.decode("utf-8")})
     except UnicodeDecodeError:
-        return json.dumps({"encoding": "base64", "content": base64.b64encode(raw).decode("ascii")})
+        return _dumps({"encoding": "base64", "content": base64.b64encode(raw).decode("ascii")})
 
 
 @mcp.tool()
@@ -555,12 +591,12 @@ def write_reference(
         encoding: "text" or "base64".
     """
     if encoding not in ("text", "base64"):
-        return json.dumps({"error": f"encoding must be 'text' or 'base64', got {encoding!r}"})
+        return _dumps({"error": f"encoding must be 'text' or 'base64', got {encoding!r}"})
     try:
         root = _bundle_root()
         path = _resolve_reference_path(root, ref_path)
     except OKFError as e:
-        return json.dumps({"error": str(e)})
+        return _dumps({"error": str(e)})
     actor = _actor_from_ctx(ctx)
     with _mutate_lock(root, ref_path):
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -569,7 +605,7 @@ def write_reference(
         else:
             path.write_bytes(base64.b64decode(content))
         _append_log(root, "Update", ref_path, actor, "reference file written")
-    return json.dumps({"ref_path": ref_path, "written": True})
+    return _dumps({"ref_path": ref_path, "written": True})
 
 
 # --------------------------------------------------------------------------- #
@@ -583,7 +619,7 @@ def reset_session() -> str:
     every write lives on disk. Retained so a driver's between-run call keeps
     working (asaree.services.mcp_service.reset_server_session calls this on
     any registered server generically)."""
-    return json.dumps({"note": "stateless server; no in-process session to reset", "cleared": {}})
+    return _dumps({"note": "stateless server; no in-process session to reset", "cleared": {}})
 
 
 @mcp.tool()

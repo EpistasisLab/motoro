@@ -192,6 +192,40 @@ def test_mark_verified_does_not_touch_generated_or_body():
     assert len(twice["verified"]) == 2
 
 
+def test_a_yaml_native_timestamp_does_not_break_a_read(_bundle):
+    # An unquoted `at:` is valid YAML that safe_load resolves to a datetime, so
+    # a hand-authored bundle used to fail every read with "Object of type
+    # datetime is not JSON serializable" -- the tool raised while serializing,
+    # not while parsing, so nothing came back at all.
+    (_bundle / "hand-written.md").write_text(
+        "---\n"
+        "type: Metric\n"
+        "title: Activation Rate\n"
+        "generated:\n"
+        "  by: process:okf-test-generator\n"
+        "  at: 2026-08-25T16:00:00Z\n"
+        "verified:\n"
+        "  - by: human:someone\n"
+        "    at: 2026-08-26\n"
+        "---\n"
+        "# Definition\n"
+    )
+    listed = _load(okf.list_concepts())
+    assert [c["id"] for c in listed["concepts"]] == ["hand-written"]
+    # ISO 8601, matching the string form this server writes itself, rather than
+    # YAML's space-separated str(datetime).
+    assert listed["concepts"][0]["generated"]["at"].startswith("2026-08-25T16:00:00")
+    assert listed["concepts"][0]["verified"][0]["at"] == "2026-08-26"
+
+    # Every read, not just the one that was reported: search and get share the
+    # same encoder.
+    assert [c["id"] for c in _load(okf.search_concepts("activation"))["concepts"]] == ["hand-written"]
+    assert _load(okf.get_concept("hand-written"))["generated"]["at"].startswith("2026-08-25T16:00:00")
+
+    # And a write path that echoes frontmatter back still answers.
+    assert _load(okf.mark_verified("hand-written"))["verified"][0]["at"] == "2026-08-26"
+
+
 def test_get_concept_resolves_outgoing_links():
     okf.create_concept("model", "A", "a", body="see [the dataset](../datasets/b.md) for details")
     got = _load(okf.get_concept("a"))
