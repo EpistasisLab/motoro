@@ -55,6 +55,15 @@ class RunContext:
     # ``workspace_id``/``dataset_id`` through tool arguments. Sourced from the
     # run's ``run_metadata["workspace_id"]``; ``None`` for runs with no workspace.
     workspace_id: str | None = None
+    # Further ambient values the *caller* wants every MCP tool call to receive,
+    # emitted into request ``_meta`` under ``motoro.ambient.<key>`` (see
+    # ``META_AMBIENT_PREFIX`` in ``mcp/adapters``). ``workspace_id`` above is
+    # first-class because core resumes and snapshots on it; this is for the
+    # references core has no opinion about -- a dataset name, an artifact path
+    # -- so a product can bind its own ids without core learning its vocabulary
+    # and without a core release per reference type. Sourced from the run's
+    # ``run_metadata["ambient_meta"]``; values must be JSON-serializable.
+    ambient_meta: dict[str, Any] = field(default_factory=dict)
 
     # Phase outputs (populated as phases execute)
     phase_outputs: dict[str, BaseModel] = field(default_factory=dict)
@@ -209,6 +218,7 @@ class RunContext:
             "user_input": self.user_input,
             "owner_id": str(self.owner_id) if self.owner_id else None,
             "workspace_id": self.workspace_id,
+            "ambient_meta": self.ambient_meta,
             "phase_outputs": serialized_outputs,
             "conversation_history": self.conversation_history,
             "available_tools": self.available_tools,
@@ -246,6 +256,7 @@ class RunContext:
             user_input=data["user_input"],
             owner_id=(uuid.UUID(data["owner_id"]) if data.get("owner_id") else None),
             workspace_id=data.get("workspace_id"),
+            ambient_meta=data.get("ambient_meta", {}),
             phase_outputs=phase_outputs,
             conversation_history=data.get("conversation_history", []),
             available_tools=data.get("available_tools", []),

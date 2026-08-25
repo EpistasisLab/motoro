@@ -1,4 +1,4 @@
-"""Sense phase — gathers input, context, and relevant memories for the Reason phase."""
+"""Sense phase — retrieves memories, and forwards the context already resolved."""
 
 from __future__ import annotations
 
@@ -17,11 +17,38 @@ logger = logging.getLogger(__name__)
 
 
 class SensePhase:
-    """Perception layer: collects user input, agent context, tools, and memories.
+    """Perception layer. Does NOT call the LLM — this is a data gathering phase.
 
-    Does NOT call the LLM — this is a data gathering phase.
-    When a MemoryService is injected, relevant episodic and semantic memories
-    are retrieved and injected into the RunContext before the Reason phase.
+    Read :meth:`execute` before adding anything here: memories are the only
+    field this phase actually *gathers*, and the reason is a contract, not an
+    accident of how it grew.
+
+    A run's inputs reach the engine by one of three routes, and only one of them
+    is this phase:
+
+    1. **Capability** — the model, the execution pattern, the tool set, the
+       skills. Resolved before the engine starts and carried on
+       :class:`~motoro.engine.context.RunContext` as configuration. These change
+       what the agent *can do*; they are never prose in a prompt, so there is
+       nothing for a perception step to collect.
+    2. **Reference** — an id pointing at data that lives somewhere else: a
+       workspace, a dataset, an artifact. Bound into every MCP tool call's
+       ambient request ``_meta`` (``RunContext.workspace_id`` and
+       ``RunContext.ambient_meta``) so a tool receives it out-of-band. The
+       contents are loaded by the tool, on demand — never read into context up
+       front, and never transcribed by the model.
+    3. **Content** — text that genuinely belongs in the prompt, and is small
+       enough to belong there: the user input, the goal, retrieved memories.
+       This is the only route that passes through Sense, and memories are the
+       only part of it Sense fetches rather than forwards.
+
+    So the honest summary is: retrieve memories (episodic via the injected
+    MemoryService, plus working memory when configured), and snapshot the
+    already-resolved rest into a :class:`SenseOutput` for the phases downstream.
+
+    A new kind of input almost always belongs to route 1 or 2 — that is where
+    it stays out of the context window. Reaching for Sense usually means it was
+    misclassified as route 3.
     """
 
     def __init__(
@@ -39,7 +66,15 @@ class SensePhase:
         return "sense"
 
     async def execute(self, context: RunContext) -> PhaseResult:
-        """Gather and structure all available input, injecting memories if configured."""
+        """Retrieve memories if configured, then snapshot the context as SenseOutput.
+
+        The five non-memory fields of the output are copies of values
+        ``RunContext`` already held on entry — this phase does not source them.
+        Note that not every pattern reads them back: ReAct, for one, consumes
+        only ``agent_goal``/``memories``/``user_input`` and re-reads the rest off
+        the context directly, so memory retrieval is Sense's entire contribution
+        to it.
+        """
         memories = list(context.memories)
 
         if (

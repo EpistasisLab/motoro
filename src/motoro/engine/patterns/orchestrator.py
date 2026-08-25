@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -27,6 +28,19 @@ from motoro.schemas.llm import ActOutput, PlanOutput, ReasonOutput, SenseOutput
 
 log = structlog.get_logger()
 logger = logging.getLogger(__name__)
+
+
+def _is_json_safe(value: Any) -> bool:
+    """Whether *value* survives a round trip through JSON.
+
+    Used to filter caller-supplied ``ambient_meta`` at the boundary — see the
+    lift in :meth:`PatternOrchestrator.execute`.
+    """
+    try:
+        json.dumps(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 # What an agent gets when it configures no execution pattern at all (M112).
 #
@@ -242,6 +256,19 @@ class PatternOrchestrator:
                 ws = run_metadata.get("workspace_id")
                 if isinstance(ws, str) and ws:
                     context.workspace_id = ws
+            # Same lift for the caller's open-ended ambient values (see
+            # RunContext.ambient_meta). Filtered to JSON-serializable entries
+            # here, at the one place untrusted-shaped input enters, so neither
+            # the wire call nor RunContext.snapshot() can fail later on a value
+            # that was never sendable in the first place.
+            if not context.ambient_meta:
+                ambient = run_metadata.get("ambient_meta")
+                if isinstance(ambient, dict):
+                    context.ambient_meta = {
+                        str(k): v
+                        for k, v in ambient.items()
+                        if k and _is_json_safe(v)
+                    }
 
         # Expose runtime to plugins that need LLM access (e.g., ReasonAct)
         context.metadata["_runtime"] = rt

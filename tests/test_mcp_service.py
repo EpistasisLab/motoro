@@ -296,6 +296,73 @@ def test_build_run_meta_includes_agent_name_and_model_only_together() -> None:
     assert _build_run_meta(without_name) is None
 
 
+def test_build_run_meta_namespaces_caller_ambient_values() -> None:
+    from motoro.engine.context import RunContext
+    from motoro.mcp.adapters import META_AMBIENT_PREFIX, META_KEY_WORKSPACE_ID, _build_run_meta
+    from motoro.schemas.agent import ModelConfig
+
+    context = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(),
+        user_input="u",
+        workspace_id="exp1/cellA",
+        ambient_meta={"dataset_names": ["spinal"], "skip_me": None, "": "unnamed"},
+    )
+    assert _build_run_meta(context) == {
+        f"{META_AMBIENT_PREFIX}dataset_names": ["spinal"],
+        META_KEY_WORKSPACE_ID: "exp1/cellA",
+    }
+
+    # A product key can never shadow one of core's: the prefix puts it in a
+    # different namespace even when the bare name collides exactly.
+    shadowing = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(),
+        user_input="u",
+        workspace_id="real",
+        ambient_meta={"workspace_id": "spoofed"},
+    )
+    meta = _build_run_meta(shadowing)
+    assert meta is not None
+    assert meta[META_KEY_WORKSPACE_ID] == "real"
+    assert meta[f"{META_AMBIENT_PREFIX}workspace_id"] == "spoofed"
+
+    # Ambient values alone still count as identity worth sending.
+    ambient_only = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(),
+        user_input="u",
+        ambient_meta={"dataset_names": ["a"]},
+    )
+    assert _build_run_meta(ambient_only) == {f"{META_AMBIENT_PREFIX}dataset_names": ["a"]}
+
+
+def test_run_context_snapshot_round_trips_ambient_meta() -> None:
+    """A paused run must resume against the same ambient references it started
+    with — an id dropped by the snapshot would silently un-bind every tool call
+    after the resume."""
+    from motoro.engine.context import RunContext
+    from motoro.schemas.agent import ModelConfig
+
+    context = RunContext(
+        agent_goal="g",
+        system_prompt="s",
+        model_config=ModelConfig(),
+        user_input="u",
+        ambient_meta={"dataset_names": ["spinal", "demographics"]},
+    )
+    restored = RunContext.from_snapshot(context.to_snapshot())
+    assert restored.ambient_meta == {"dataset_names": ["spinal", "demographics"]}
+
+    # Older snapshots predate the field entirely.
+    legacy = dict(context.to_snapshot())
+    legacy.pop("ambient_meta")
+    assert RunContext.from_snapshot(legacy).ambient_meta == {}
+
+
 @needs_db
 async def test_call_tool_delivers_meta_verbatim() -> None:
     """The exact wire-level guarantee _build_run_meta/execute_step rely on:

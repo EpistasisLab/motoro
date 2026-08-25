@@ -43,6 +43,19 @@ META_KEY_OWNER_ID = "motoro.owner_id"
 # "<agent_name>/<model>" string), rather than core baking in one format.
 META_KEY_AGENT_NAME = "motoro.agent_name"
 META_KEY_MODEL = "motoro.model"
+# Prefix for caller-supplied ambient values (``RunContext.ambient_meta``), e.g.
+# ``motoro.ambient.dataset_names``. The keys above are a closed set of run
+# identity core itself owns; this is the open extension point for the *product*
+# built on core, which has its own references a tool should receive ambiently
+# rather than have the model retype -- a dataset name, an artifact path, a
+# tenant. Sub-namespaced so a product key can never shadow or be mistaken for
+# one of core's, and so a server can tell the two apart by prefix alone.
+#
+# It carries the same trust as the keys above and for the same reason: the
+# values come from the run's ``run_metadata``, set by whoever *started* the run,
+# and the model has no way to reach them. That is the whole point -- a value in
+# here is one the model cannot forge, unlike anything it puts in ``arguments``.
+META_AMBIENT_PREFIX = "motoro.ambient."
 
 log = structlog.get_logger()
 
@@ -55,6 +68,14 @@ def _build_run_meta(context: RunContext) -> dict[str, Any] | None:
     the keys that are actually present.
     """
     meta: dict[str, Any] = {}
+    for key, value in context.ambient_meta.items():
+        # Written before core's own keys so a malformed product key can never
+        # displace run identity -- the loop below overwrites, not the reverse.
+        # (The prefix already makes a collision impossible; this makes the
+        # ordering an explicit guarantee rather than a consequence.)
+        if not key or value is None:
+            continue
+        meta[f"{META_AMBIENT_PREFIX}{key}"] = value
     if context.workspace_id:
         meta[META_KEY_WORKSPACE_ID] = context.workspace_id
     if context.run_id is not None:

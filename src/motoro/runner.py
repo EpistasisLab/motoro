@@ -356,12 +356,19 @@ async def create_run(
     rather than block on it: create the run in a request, return the id, let a
     worker execute it.
 
-    *metadata* seeds ``run_metadata`` before the run ever starts — the one key
-    the engine itself reads back out is ``workspace_id``: the orchestrator lifts
-    it into ``RunContext.workspace_id`` (see :func:`execute_run`), which
-    ``mcp.adapters`` then sends ambiently on every tool call's request ``_meta``,
-    so a workspace-scoped MCP tool never needs it threaded through arguments a
-    model could omit or corrupt.
+    *metadata* seeds ``run_metadata`` before the run ever starts. Two keys the
+    engine itself reads back out, both feeding the same ambient ``_meta``
+    channel that spares a tool from arguments a model could omit or corrupt:
+
+    - ``workspace_id`` — lifted into ``RunContext.workspace_id`` (see
+      :func:`execute_run`) and sent by ``mcp.adapters`` as ``motoro.workspace_id``.
+    - ``ambient_meta`` — a dict of the caller's *own* references (a dataset
+      name, an artifact path), lifted into ``RunContext.ambient_meta`` and sent
+      key-by-key under ``motoro.ambient.``. Use this rather than asking for a
+      new first-class field: core stays out of your vocabulary, and you do not
+      need a core release to bind a new kind of id.
+
+    Everything else here is carried, not interpreted.
 
     *model_config_overrides* is a partial dict shallow-merged onto the agent's
     own ``model_config_data`` at execute time (see :func:`execute_run`) — e.g.
@@ -489,8 +496,9 @@ async def execute_run(
     the whole surface the phases use.
 
     ``run.run_metadata`` — whatever :func:`create_run` was given as *metadata* —
-    is passed to the orchestrator, which lifts a ``workspace_id`` key out of it
-    onto every MCP tool call's ambient ``_meta``. Not otherwise interpreted here;
+    is passed to the orchestrator, which lifts the ``workspace_id`` and
+    ``ambient_meta`` keys out of it onto every MCP tool call's ambient ``_meta``
+    (see :func:`create_run`). Not otherwise interpreted here;
     it is not written back afterward, so it still holds exactly what was seeded
     at creation once this returns.
 
