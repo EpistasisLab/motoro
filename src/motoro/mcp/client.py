@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import enum
 import os
 import shlex
@@ -27,6 +28,11 @@ from motoro.services.retry import retry_with_backoff
 
 log = structlog.get_logger()
 _tracer = get_tracer("mcp")
+
+# How long to wait for a connection's owner task to finish unwinding before
+# cancelling it outright. Bounds worker/API shutdown against a wedged MCP
+# subprocess that will not close its pipes.
+_DISCONNECT_TIMEOUT_SECONDS = 10.0
 
 # Default allowlist of safe environment variables for MCP subprocesses.
 # These are standard POSIX variables that do not contain secrets.
@@ -183,6 +189,11 @@ class MCPClient:
         # ``call_tool`` calls that both observe a broken pipe don't kick off
         # parallel reconnects.
         self._reconnect_lock = asyncio.Lock()
+        # The connection-owner task and its shutdown signal. See
+        # ``_own_connection`` for why the transport is opened and closed
+        # inside a task of its own rather than by whoever calls connect().
+        self._owner_task: asyncio.Task[None] | None = None
+        self._shutdown: asyncio.Event | None = None
         self._log = log.bind(server=name, transport=transport, component="mcp")
 
     def set_on_tools_changed(self, callback: Callable[[MCPClient], Awaitable[None]] | None) -> None:
@@ -211,6 +222,83 @@ class MCPClient:
         """Connect to the MCP server, initialize, and discover tools.
 
         Retries transient connection failures with exponential backoff.
+
+        The actual transport is opened by a dedicated owner task
+        (:meth:`_own_connection`), not by the caller -- see that method for
+        why. This call blocks until the connection is live and tools are
+        discovered, or raises whatever the connect failed with, so it is a
+        drop-in for the previous inline implementation.
+        """
+        # A stale owner task from a previous connect would otherwise leak its
+        # subprocess. No-op when there is none, which is the common path.
+        await self._stop_owner_task()
+
+        ready: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        # Handed to the owner task by value, and *also* kept on self for
+        # _stop_owner_task to signal. The task must not read it back off self:
+        # _stop_owner_task clears the attribute as soon as it has signalled,
+        # which can happen while the task is still inside _open().
+        shutdown = asyncio.Event()
+        self._shutdown = shutdown
+        self._owner_task = asyncio.create_task(
+            self._own_connection(ready, shutdown),
+            name=f"mcp-connection:{self.name}",
+        )
+        try:
+            await ready
+        except BaseException:
+            # Either the connect failed inside the owner task (which is
+            # already unwinding) or *we* were cancelled while waiting. Both
+            # need the task joined before we propagate, so a cancelled connect
+            # can't leave an orphaned subprocess behind.
+            await self._stop_owner_task()
+            raise
+
+    async def _own_connection(self, ready: asyncio.Future[None], shutdown: asyncio.Event) -> None:
+        """Own the transport for its entire lifetime, in one task.
+
+        ``stdio_client``/``streamable_http_client``/``sse_client`` and
+        ``ClientSession`` are all async context managers wrapping an anyio
+        task group, and anyio requires a task group's cancel scope to be
+        exited **by the task that entered it**. The client used to store the
+        half-entered context managers on ``self`` for some later, arbitrary
+        caller to exit -- which made the whole class task-affine: connect and
+        disconnect had to happen in the same task or anyio raised
+        ``RuntimeError: Attempted to exit cancel scope in a different task
+        than it was entered in``, *and* cancelled the scope's owning task as
+        collateral damage (a live agent run, in practice).
+
+        Three call paths violated that: ``MCPServerRegistry.register``
+        re-registering an existing name, ``disconnect_all``, and
+        ``_attempt_reconnect``. Rather than make each one careful, the
+        connection now lives in a task of its own: this one opens it, parks
+        on ``_shutdown``, and closes it on the way out. Enter and exit are
+        therefore always the same task no matter who calls connect() or
+        disconnect(), and the class is task-agnostic.
+        """
+        try:
+            await self._open()
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+            # Half-opened state is cleaned up by _open's own per-transport
+            # handlers (Issues #711/#715); nothing further to close here.
+            self._connected = False
+            self._session = None
+            return
+
+        if not ready.done():
+            ready.set_result(None)
+
+        try:
+            await shutdown.wait()
+        finally:
+            await self._close()
+
+    async def _open(self) -> None:
+        """Open the transport, initialize the session, and discover tools.
+
+        Always runs inside the owner task -- see :meth:`_own_connection`.
         """
 
         async def _do_connect() -> None:
@@ -514,30 +602,12 @@ class MCPClient:
                 # Another caller raced us and already reconnected.
                 return True
 
-            # Best-effort teardown of the dead session; ignore errors —
-            # we're about to recreate everything.
-            try:
-                if self._session_cm:
-                    await self._session_cm.__aexit__(None, None, None)
-            except BaseException:
-                self._log.debug("mcp.reconnect.session_cleanup_failed", exc_info=True)
-            try:
-                if self._cm:
-                    await self._cm.__aexit__(None, None, None)
-            except BaseException:
-                self._log.debug("mcp.reconnect.transport_cleanup_failed", exc_info=True)
-            try:
-                if self._http_client:
-                    await self._http_client.aclose()
-            except BaseException:
-                self._log.debug("mcp.reconnect.http_cleanup_failed", exc_info=True)
-
-            self._session = None
-            self._session_cm = None
-            self._cm = None
-            self._http_client = None
-            self._read = None
-            self._write = None
+            # Tear the dead connection down through its owner task rather than
+            # __aexit__-ing the context managers from whatever task happened to
+            # hit the broken pipe -- see _own_connection. connect() would do
+            # this for us anyway; it is spelled out here so a failure to close
+            # is logged as a reconnect step rather than as a connect step.
+            await self._stop_owner_task()
 
             try:
                 await self.connect()
@@ -649,6 +719,64 @@ class MCPClient:
     async def disconnect(self) -> None:
         """Disconnect from the MCP server.
 
+        Safe to call from any task, and safe to call when never connected or
+        already disconnected -- the teardown itself happens in the owner task
+        (:meth:`_own_connection`); this just signals it and waits.
+        """
+        await self._stop_owner_task()
+
+    async def _stop_owner_task(self) -> None:
+        """Signal the owner task to close the connection, and join it.
+
+        Bounded by ``_DISCONNECT_TIMEOUT_SECONDS`` so one wedged subprocess
+        cannot hang process shutdown; on overrun the owner task is cancelled,
+        which still unwinds the transport in the task that opened it.
+        """
+        task = self._owner_task
+        if task is None:
+            return
+        self._owner_task = None
+
+        if self._shutdown is not None:
+            self._shutdown.set()
+        self._shutdown = None
+
+        if task.done():
+            # Surface a connection that died on its own rather than swallowing it.
+            exc = None if task.cancelled() else task.exception()
+            if exc is not None:
+                self._log.warning(
+                    "mcp.connection.owner_task_failed",
+                    error_type=type(exc).__name__,
+                    error=str(exc),
+                )
+            return
+
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_DISCONNECT_TIMEOUT_SECONDS)
+        except TimeoutError:
+            self._log.warning(
+                "mcp.connection.close_timeout",
+                timeout_seconds=_DISCONNECT_TIMEOUT_SECONDS,
+            )
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        except asyncio.CancelledError:
+            # We were cancelled while waiting; the owner task still needs to
+            # finish unwinding, so leave it to its own shielded completion.
+            task.cancel()
+            raise
+        except Exception as exc:
+            self._log.warning(
+                "mcp.connection.owner_task_failed",
+                error_type=type(exc).__name__,
+                error=str(exc),
+            )
+
+    async def _close(self) -> None:
+        """Tear the transport down. Always runs inside the owner task.
+
         Issue #737 — when teardown raises, the exception type and message are
         surfaced as a structured warning instead of silently swallowed.
         """
@@ -673,7 +801,11 @@ class MCPClient:
             )
         finally:
             self._session = None
+            self._session_cm = None
+            self._cm = None
             self._http_client = None
+            self._read = None
+            self._write = None
             self._connected = False
             self._tools = []
             self._instructions = ""
