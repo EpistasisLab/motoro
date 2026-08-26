@@ -706,3 +706,159 @@ async def test_live_connect_completes_within_a_bounded_timeout() -> None:
     # Cleared on disconnect alongside the tool list: neither survives the
     # session that produced it.
     assert client.instructions == ""
+
+
+# --------------------------------------------------------------------------- #
+#  Task affinity — connect and disconnect from different tasks                 #
+# --------------------------------------------------------------------------- #
+#
+# MCPClient used to stash the half-entered stdio_client/ClientSession context
+# managers on self for a later caller to __aexit__. Both wrap an anyio task
+# group, and anyio requires a cancel scope to be exited by the task that
+# entered it -- so the class only worked if connect() and disconnect() ran in
+# the same task. When they didn't, anyio raised "Attempted to exit cancel scope
+# in a different task than it was entered in" *and* cancelled the scope's
+# owning task, which in production was a live agent run. The connection now
+# lives in its own task (MCPClient._own_connection); these pin that down.
+
+
+@needs_db
+async def test_disconnect_from_a_different_task_than_connect() -> None:
+    """The narrowest statement of the bug: connect here, disconnect over there.
+
+    Asserting ``not client.connected`` afterwards is *not* enough to catch the
+    regression -- a teardown failure is swallowed into a warning and the flag is
+    cleared in a ``finally`` either way, so the old task-affine implementation
+    passes that assertion while logging ``mcp.server.disconnect_failed``. That
+    log line is the observable difference, so it is what gets asserted on.
+    """
+    import structlog
+
+    from motoro.mcp.client import MCPClient, TransportType
+
+    client = MCPClient(name="cross-task", transport=TransportType.STDIO, command=_ECHO_COMMAND)
+
+    # Connect inside a task of its own, so the task that entered the transport
+    # is definitively gone by the time we disconnect it from the main task.
+    await _with_timeout(asyncio.create_task(client.connect()))
+    assert client.connected
+
+    with structlog.testing.capture_logs() as logs:
+        await _with_timeout(asyncio.create_task(client.disconnect()))
+
+    assert not client.connected
+    failures = [e for e in logs if e.get("event") == "mcp.server.disconnect_failed"]
+    assert not failures, f"teardown crossed a task boundary: {failures}"
+
+
+@needs_db
+async def test_reregistering_a_name_does_not_cancel_the_task_using_it() -> None:
+    """The production failure, reduced: re-registering a live server used to
+    cancel whichever task had connected it -- collateral damage from anyio
+    delivering the cancel-scope cancellation to the scope's owning task."""
+    from motoro.mcp.registry import MCPServerRegistry, TransportType
+
+    registry = MCPServerRegistry()
+    name = f"echo-{uuid.uuid4().hex[:8]}"
+    victim_survived = asyncio.Event()
+
+    async def victim() -> None:
+        # Connects the server, then stays alive -- exactly what a protocol run
+        # does between hydrating the registry and finishing its graph walk.
+        await registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+        await asyncio.sleep(0.5)
+        victim_survived.set()
+
+    try:
+        task = asyncio.create_task(victim())
+        # Let it get all the way connected before we pull the rug.
+        while registry.get(name) is None or not registry.get(name).client.connected:
+            await asyncio.sleep(0.05)
+
+        # Re-register the same name from *this* task. This is what a second
+        # concurrent hydrate_registry did.
+        await _with_timeout(registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND))
+
+        await _with_timeout(task)
+        assert not task.cancelled()
+        assert victim_survived.is_set(), "re-registering cancelled the task that had connected the server"
+        assert registry.get(name).client.connected
+    finally:
+        await _with_timeout(registry.disconnect_all())
+
+
+@needs_db
+async def test_concurrent_ensure_registered_connects_exactly_once() -> None:
+    """ensure_registered's check happens under the registry lock, so N racing
+    callers produce one connection rather than N spawn/teardown cycles."""
+    from motoro.mcp.registry import MCPServerRegistry, TransportType
+
+    registry = MCPServerRegistry()
+    name = f"echo-{uuid.uuid4().hex[:8]}"
+
+    try:
+        entries = await _with_timeout(
+            asyncio.gather(
+                *(
+                    registry.ensure_registered(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+                    for _ in range(6)
+                )
+            )
+        )
+        # Same ServerEntry object every time means only the first caller
+        # actually registered; the rest short-circuited on a live connection.
+        assert all(e is entries[0] for e in entries)
+        assert entries[0].client.connected
+        assert {t.name for t in entries[0].client.tools} >= {"echo"}
+    finally:
+        await _with_timeout(registry.disconnect_all())
+
+
+@needs_db
+async def test_ensure_registered_retries_a_dead_entry() -> None:
+    """A slot that exists but failed to connect is retried, not left dead."""
+    from motoro.mcp.registry import MCPServerRegistry, TransportType
+
+    registry = MCPServerRegistry()
+    name = f"echo-{uuid.uuid4().hex[:8]}"
+
+    try:
+        # A command that cannot spawn leaves an entry with connected=False.
+        dead = await _with_timeout(
+            registry.ensure_registered(
+                name=name, transport=TransportType.STDIO, command="definitely-not-a-real-binary-xyz"
+            )
+        )
+        assert not dead.client.connected
+
+        live = await _with_timeout(
+            registry.ensure_registered(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+        )
+        assert live.client.connected
+    finally:
+        await _with_timeout(registry.disconnect_all())
+
+
+@needs_db
+async def test_disconnect_all_is_concurrent_and_clean() -> None:
+    """disconnect_all had to be sequential+reverse-ordered to satisfy anyio's
+    same-task/LIFO rule. Owner tasks removed both constraints -- so every
+    transport must now close cleanly even when they all close at once, which
+    is what the absence of a failure log asserts (see the cross-task test for
+    why the flags alone would not catch it)."""
+    import structlog
+
+    from motoro.mcp.registry import MCPServerRegistry, TransportType
+
+    registry = MCPServerRegistry()
+    names = [f"echo-{uuid.uuid4().hex[:8]}" for _ in range(4)]
+    for name in names:
+        await _with_timeout(registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND))
+    assert all(registry.get(n).client.connected for n in names)
+
+    with structlog.testing.capture_logs() as logs:
+        await _with_timeout(registry.disconnect_all())
+
+    assert registry.servers == {}
+    failures = [e for e in logs if e.get("event") in {"mcp.server.disconnect_failed", "mcp.server.disconnect_error"}]
+    assert not failures, f"concurrent disconnect_all did not close cleanly: {failures}"

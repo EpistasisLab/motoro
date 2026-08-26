@@ -346,9 +346,18 @@ async def hydrate_registry(*, registry: MCPServerRegistry | None = None) -> list
     live connection.
 
     Returns the names of servers that failed to connect (already logged); a
-    server already present in the registry is left untouched rather than
-    reconnected, so calling this twice in one process is a cheap no-op for
-    anything already hydrated.
+    server already connected is left untouched rather than reconnected, so
+    calling this twice in one process is a cheap no-op for anything already
+    hydrated.
+
+    Safe to call concurrently: the already-connected check happens inside the
+    registry's lock (``ensure_registered``), not here. It used to be a
+    ``config.name in reg.servers`` test in this loop, which is a check-then-act
+    race -- N concurrent hydrations all saw a server as missing before any of
+    them finished connecting it, so all N registered, and every one after the
+    first tore down a live connection the others were still using. Callers that
+    hydrate per-unit-of-work rather than once at startup (a worker picking up a
+    server registered since it booted) hit that with any real concurrency.
     """
     reg = registry or get_registry()
     failed: list[str] = []
@@ -356,10 +365,8 @@ async def hydrate_registry(*, registry: MCPServerRegistry | None = None) -> list
         configs = (await db.execute(select(MCPServerConfig))).scalars().all()
 
     for config in configs:
-        if config.name in reg.servers:
-            continue
         try:
-            entry = await reg.register(
+            entry = await reg.ensure_registered(
                 name=config.name,
                 transport=TransportType(config.transport.value),
                 command=config.command,
