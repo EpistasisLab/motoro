@@ -15,73 +15,106 @@ real bugs that shaped each of those decisions.
 
 ## Features
 
-**Agent runtime.** A Sense → Reason → Plan → Act loop over durable agents and
-runs: `create_agent` provisions the agent once, `create_run` and `execute_run`
-are separate calls so a product can execute inline or hand the run to a worker,
-and `fail_run` closes out a run whose process died. Runs carry heartbeats, and
-re-entering a terminal status is a no-op, so a stale-run sweep can't clobber a
-live loop.
+| Area | What core gives you |
+|---|---|
+| **Agent runtime** | Sense → Reason → Plan → Act over durable agents and runs |
+| **Pattern engine** | Plugin patterns that hook the phase boundaries |
+| **LLM bridge** | Structured output across five provider paths |
+| **Output contracts** | A universal envelope, optionally extracted into typed fields |
+| **Memory** | Working, episodic and semantic behind one service |
+| **MCP** | Client, registry, persisted servers, bundled servers |
+| **Agent Skills** | `SKILL.md` with three-level progressive disclosure |
+| **Security** | Injection fencing, SSRF guard, allowlists, encryption at rest |
+| **Observability** | OTel traces and metrics, per-model cost tracking |
+| **Persistence** | Core's own Postgres schema and migration chain |
 
-**Pattern engine.** Patterns are plugin classes registered by slug
-(`reason_act`, `single_agent_baseline` ship built in) that hook the phase
-boundaries of the loop. The composition engine resolves hook ordering, detects
-conflicts and validates dependencies; the class itself is the source of truth
-for pattern metadata, so an agent's `pattern_config` is validated and its
-`pattern_params` defaulted at creation time rather than after the model has
-been billed.
+**Agent runtime**
 
-**LLM bridge.** Multi-provider structured output through litellm + Instructor —
-Anthropic (direct, Microsoft Foundry, or Bedrock), OpenAI, OpenRouter, and any
-self-hosted OpenAI-compatible server. `model_capabilities` is the single source
-of truth for whether a given model takes `temperature` or the adaptive-thinking
-`effort` dial, so call sites don't have to know. Structured-output retries,
-per-call timeouts, and equal-jitter exponential backoff are built in.
+- `create_agent` provisions once — agents are durable resources
+- `create_run` and `execute_run` are separate, so a product can run inline or
+  hand execution to a worker
+- `fail_run` closes out a run whose process died; it's a no-op on a run already
+  in a terminal status, so a stale-run sweep can't clobber a live loop
+- Runs carry heartbeats for that sweep to key on
 
-**Output contracts.** Every run produces a universal envelope assembled from
-run data with no extra LLM call. An agent that declares an `output_contract`
-additionally gets one extraction pass into typed fields — every field optional,
-inference forbidden, and a failed extraction degrades to `None` with a caveat
-instead of killing the run.
+**Pattern engine**
 
-**Memory.** Three stores behind one `MemoryService`: working memory in Redis
-for intra-run state (sliding-window or LLM-summarization eviction, guarded by a
-per-run lock so concurrent writers can't double-summarize), episodic memory for
-per-run summaries that carry learning across runs, and semantic memory over
-pgvector for embedding-based recall.
+- Patterns are plugin classes registered by slug — `reason_act` and
+  `single_agent_baseline` ship built in
+- Composition resolves hook ordering, detects conflicts, validates dependencies
+- The class is the source of truth for metadata, so `pattern_config` is
+  validated and `pattern_params` defaulted at agent-creation time — not after
+  the model has been billed
 
-**MCP integration.** A client over stdio, HTTP and SSE transports, a registry
-managing concurrent server connections, and tool adapters that expose MCP tools
-to the Act phase. Server configurations persist, so every process after the
-first reconnects from the table rather than from code. Subprocess environments
-are allowlisted, so credentials don't leak into untrusted servers.
+**LLM bridge**
 
-**Bundled MCP servers.** Core ships servers of its own, ready to register —
-currently an OKF (Open Knowledge Format) server that mediates a knowledge
-bundle rather than exposing the filesystem: reads return pre-parsed, filtered
-JSON, and writes enforce the spec's structural rules.
+- Multi-provider structured output via litellm + Instructor
+- Anthropic (direct, Microsoft Foundry, or Bedrock), OpenAI, OpenRouter, and
+  any self-hosted OpenAI-compatible server
+- `model_capabilities` decides per model whether to send `temperature` or the
+  adaptive-thinking `effort` dial, so call sites don't have to know
+- Structured-output retries, per-call timeouts, equal-jitter backoff
 
-**Agent Skills.** `SKILL.md` documents with YAML frontmatter, stored as rows
-and honoured with the format's three disclosure levels — the index always in
-context, the body loaded on request as a tool result, bundled reference files
-read only when the body points at one. A skill can be ingested as its whole
-directory, not just its `SKILL.md`.
+**Output contracts**
 
-**Security.** Prompt-injection fencing that delimits user-controlled text as
-data, an SSRF guard for every user-supplied outbound URL, an MCP command
-allowlist, Fernet encryption for secrets at rest, and a credential scrubber
-over error messages and logs.
+- Every run yields a universal envelope, assembled from run data with no extra
+  LLM call
+- An agent declaring an `output_contract` also gets one extraction pass into
+  typed fields
+- Every contracted field is optional and inference is forbidden — a failed
+  extraction degrades to `None` with a caveat rather than killing the run
 
-**Observability.** OpenTelemetry tracing where a run is a trace and each phase,
-LLM call and tool call is a span, with error-aware sampling that force-keeps
-failed spans the ratio sampler would have dropped. Metrics export via
-Prometheus pull or OTLP push, under a configurable prefix so two products don't
-collide in one registry. Per-model cost tracking with configurable overrides
-and a litellm fallback.
+**Memory**
 
-**Persistence.** Core owns its own PostgreSQL database and Alembic chain,
-independent of the product's — `python -m motoro.migrations upgrade` is a
-deploy step, and every migration is safe to re-run over an existing schema.
-Worker helpers keep long-running processes resilient to dropped connections.
+- **Working** — Redis, intra-run, sliding-window or LLM-summarization eviction,
+  guarded by a per-run lock so concurrent writers can't double-summarize
+- **Episodic** — per-run summaries that carry learning across runs
+- **Semantic** — pgvector, embedding-based recall
+- All three behind one `MemoryService`
+
+**MCP**
+
+- Client over stdio, HTTP and SSE; registry for concurrent connections; tool
+  adapters that expose MCP tools to the Act phase
+- Server configs persist — every process after the first reconnects from the
+  table, not from code
+- Subprocess environments are allowlisted, so credentials don't leak into
+  untrusted servers
+- Bundled and ready to register: an OKF (Open Knowledge Format) server that
+  mediates a knowledge bundle instead of exposing the filesystem — reads return
+  pre-parsed, filtered JSON; writes enforce the spec's structural rules
+
+**Agent Skills**
+
+- `SKILL.md` documents with YAML frontmatter, stored as rows
+- Three disclosure levels honoured end to end: the index always in context, the
+  body loaded on request as a tool result, bundled reference files read only
+  when the body points at one
+- A skill can be ingested as its whole directory, not just its `SKILL.md`
+
+**Security**
+
+- Prompt-injection fencing that delimits user-controlled text as data
+- SSRF guard for every user-supplied outbound URL
+- MCP command allowlist
+- Fernet encryption for secrets at rest
+- Credential scrubbing over error messages and logs
+
+**Observability**
+
+- OTel tracing: a run is a trace; each phase, LLM call and tool call is a span
+- Error-aware sampling force-keeps failed spans the ratio sampler would drop
+- Metrics via Prometheus pull or OTLP push, under a configurable prefix so two
+  products don't collide in one registry
+- Per-model cost tracking with configurable overrides and a litellm fallback
+
+**Persistence**
+
+- Core owns its own PostgreSQL database and Alembic chain, independent of the
+  product's
+- `python -m motoro.migrations upgrade` is a deploy step; every migration is
+  safe to re-run over an existing schema
+- Worker helpers keep long-running processes resilient to dropped connections
 
 ## Layout
 
