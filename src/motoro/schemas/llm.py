@@ -71,6 +71,10 @@ class SenseOutput(BaseModel):
     system_prompt: str
     conversation_history: list[dict[str, object]] = Field(default_factory=list)
     available_tools: list[dict[str, object]] = Field(default_factory=list)
+    # Peer agents this run may consult -- forwarded from RunContext, not
+    # discovered. See RunContext.available_agents for why these are separate
+    # from available_tools.
+    available_agents: list[dict[str, object]] = Field(default_factory=list)
     memories: list[dict[str, object]] = Field(default_factory=list)
 
 

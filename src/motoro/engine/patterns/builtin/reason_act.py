@@ -22,6 +22,7 @@ import structlog
 from pydantic import BaseModel
 
 from motoro.engine.act import SUPPRESS_FINAL_SYNTHESIS_KEY
+from motoro.engine.agent_channel import agents_to_openai_format
 from motoro.engine.context import RunContext
 from motoro.engine.patterns.base import HookAction, HookCallable, HookPoint, PatternPlugin
 from motoro.engine.patterns.prompts.reason_act import (
@@ -322,6 +323,13 @@ class ReasonActPlugin(PatternPlugin):
 
         tools = tools_to_openai_format(context.available_tools) if context.available_tools else []
         name_map = build_openai_tool_name_map(context.available_tools)
+        # Peers ride the same function payload -- that is the only channel a
+        # model can *choose* an action through -- but they are deliberately kept
+        # out of ``name_map``. Dispatch identifies them by the peer map alone,
+        # and Act resolves the ``ask_*`` name it receives back to an agent id
+        # rather than to an MCP tool. Bound before ``bound_names`` is taken so
+        # the synthetic tools below can never be named over a peer.
+        tools.extend(agents_to_openai_format(context.available_agents))
         bound_names = {str(t["function"]["name"]) for t in tools}
         terminator = resolve_final_answer_name(bound_names)
         tools.append(build_final_answer_tool(terminator))
@@ -444,9 +452,7 @@ class ReasonActPlugin(PatternPlugin):
         if file_calls:
             for call in file_calls:
                 wanted = str(call.tool_args.get("path") or "")
-                messages.append(
-                    {"role": "tool", "tool_call_id": call.id, "content": render_skill_file(skills, wanted)}
-                )
+                messages.append({"role": "tool", "tool_call_id": call.id, "content": render_skill_file(skills, wanted)})
                 log.info("reason_act.skill_file_read", path=wanted, step=step_count, component="reason_act")
             context.metadata[_KEY_MESSAGES] = messages
 

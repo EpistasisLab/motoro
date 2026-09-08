@@ -7,6 +7,7 @@ from typing import Any
 import structlog
 from pydantic import ValidationError
 
+from motoro.engine.agent_channel import build_agent_name_map, format_agents_for_prompt
 from motoro.engine.context import RunContext
 from motoro.engine.phase import PhaseResult
 from motoro.mcp.adapters import format_tools_for_prompt
@@ -62,6 +63,22 @@ def _build_plan_prompt(
                 '  {"action": "get file", "tool_name": "get_file_contents", '
                 '"tool_args": {"owner": "user", "repo": "myrepo", "path": "README.md"}}'
             )
+
+    if sense_output.available_agents:
+        agents_section = format_agents_for_prompt(sense_output.available_agents)
+        if agents_section:
+            context_parts.append(agents_section)
+            # Peers are addressed through the same tool_name slot as a tool --
+            # that is what makes a planned consultation dispatchable -- so the
+            # plan has to be told the callable names. _validate_plan_tools
+            # accepts them alongside the MCP allow-list.
+            names = ", ".join(build_agent_name_map(sense_output.available_agents))
+            if names:
+                context_parts.append(
+                    "To consult one of those agents, set tool_name to its function "
+                    f'({names}) with tool_args {{"question": "..."}}. '
+                    "Only plan a consultation you actually need."
+                )
 
     if reason_output.key_observations:
         context_parts.append("Key observations:\n" + "\n".join(f"- {o}" for o in reason_output.key_observations))

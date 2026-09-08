@@ -5,6 +5,7 @@ from __future__ import annotations
 import structlog
 from pydantic import ValidationError
 
+from motoro.engine.agent_channel import format_agents_for_prompt
 from motoro.engine.context import RunContext
 from motoro.engine.phase import PhaseResult
 from motoro.mcp.adapters import format_tools_for_prompt
@@ -63,6 +64,14 @@ def _build_reason_prompt(sense_output: SenseOutput) -> list[dict[str, str]]:
         tools_section = format_tools_for_prompt(sense_output.available_tools)
         if tools_section:
             context_parts.append(tools_section)
+
+    # Its own section, never merged into the tool list: strategy changes when a
+    # collaborator is available, and the model has to weigh that as a different
+    # kind of option than a tool call.
+    if sense_output.available_agents:
+        agents_section = format_agents_for_prompt(sense_output.available_agents)
+        if agents_section:
+            context_parts.append(agents_section)
 
     if sense_output.memories:
         memory_texts = [str(m.get("content", "")) for m in sense_output.memories]

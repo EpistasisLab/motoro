@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Protocol
 
 import structlog
 
+from motoro.engine.agent_channel import agents_to_openai_format, build_agent_name_map, consult_peer
 from motoro.engine.context import RunContext
 from motoro.engine.phase import PhaseResult
 from motoro.schemas.llm import (
@@ -91,11 +92,19 @@ class _StepOutcome:
     call. ``text`` is the assistant prose from the same completion — the
     model's reasoning for the calls it made — and is empty for a pure
     tool-call turn.
+
+    ``agent_results`` is the peer-consultation counterpart, kept in its own
+    field precisely because a peer reply is not a ``ToolCallRecord``: it did not
+    come from the MCP registry, it has no server or tool identity, and folding
+    it into tool telemetry would make a consultation indistinguishable from a
+    tool call in every downstream consumer. Each entry is
+    ``(result_text, success)``.
     """
 
     text: str
     llm_record: LLMCallRecord | None
     tool_results: list[tuple[str, ToolCallRecord]] = field(default_factory=list)
+    agent_results: list[tuple[str, bool]] = field(default_factory=list)
 
 
 class StepExecutor(Protocol):
@@ -169,10 +178,15 @@ class ActPhase:
         self,
         llm_service: LLMService,
         mcp_executor: object | None = None,
+        agent_messenger: object | None = None,
     ) -> None:
         self._llm = llm_service
         self._default_executor = LLMStepExecutor(llm_service)
         self._mcp_executor = mcp_executor
+        # A fallback only: ``RunContext.agent_messenger`` is the source both this
+        # phase and ``reason_act`` (which never constructs an ActPhase) read, so
+        # the two dispatch paths cannot drift apart.
+        self._agent_messenger = agent_messenger
 
     @property
     def name(self) -> str:
@@ -192,17 +206,25 @@ class ActPhase:
             step_log = log.bind(step_index=i, action=step.action, component="act")
             try:
                 outcome = await self._execute_single_step(step, context, prior_results=results)
-                executor_type = "mcp" if outcome.tool_results else "llm"
+                if outcome.tool_results:
+                    executor_type = "mcp"
+                elif outcome.agent_results:
+                    executor_type = "agent"
+                else:
+                    executor_type = "llm"
                 step_log.debug(
                     "act.step.completed",
                     executor=executor_type,
                     tool_calls=len(outcome.tool_results),
+                    agent_calls=len(outcome.agent_results),
                 )
+
+                dispatched = bool(outcome.tool_results or outcome.agent_results)
 
                 # Prose that arrived alongside the tool calls is the model's own
                 # reasoning for them — keep it in the transcript, ahead of the
                 # results it motivated.
-                if outcome.tool_results and outcome.text:
+                if dispatched and outcome.text:
                     results.append(
                         StepResult(
                             step_index=i,
@@ -213,7 +235,7 @@ class ActPhase:
                     )
                     final_parts.append(outcome.text)
 
-                if outcome.tool_results:
+                if dispatched:
                     # One StepResult per tool call — runtime.py folds several of
                     # these into the ``{"calls": [...]}`` telemetry shape.
                     for result_text, call_record in outcome.tool_results:
@@ -227,6 +249,20 @@ class ActPhase:
                             )
                         )
                         final_parts.append(result_text)
+                    # Peer replies carry no ``tool_call``: they are another
+                    # agent's words, not a tool invocation, and every consumer
+                    # of ``tool_call`` treats what it finds there as MCP
+                    # telemetry.
+                    for reply_text, reply_ok in outcome.agent_results:
+                        results.append(
+                            StepResult(
+                                step_index=i,
+                                action=step.action,
+                                result=reply_text,
+                                success=reply_ok,
+                            )
+                        )
+                        final_parts.append(reply_text)
                 else:
                     results.append(
                         StepResult(
@@ -412,6 +448,14 @@ class ActPhase:
         from motoro.services.credential_scrubber import redact_tool_args
 
         mcp = self._mcp_executor if isinstance(self._mcp_executor, MCPToolExecutor) else None
+        agent_name_map = build_agent_name_map(context.available_agents)
+
+        # A planned consultation is checked before the planned-tool branch: Plan
+        # addresses a peer through the same ``tool_name`` slot, and the peer name
+        # map is built only from declared peers, so a tool that happens to share
+        # the name can never match here.
+        if step.tool_name and step.tool_name in agent_name_map:
+            return await self._consult_planned_peer(step, context, agent_name_map[step.tool_name])
 
         # A caller that already decided the tool owns that decision — execute it
         # rather than asking a second model to choose again. Re-deciding here is
@@ -426,9 +470,16 @@ class ActPhase:
                 tool_results=[(result_text, tool_record or ToolCallRecord(tool=step.tool_name))],
             )
 
-        tool_schemas = tools_to_openai_format(context.available_tools) if context.available_tools else []
-        if mcp is None or not tool_schemas:
-            # No tools available — plain LLM text generation.
+        # Tools are only bound when there is an executor to run them; peers are
+        # dispatched through the messenger, so they stand on their own. An agent
+        # whose only capability is a peer must still get a function payload —
+        # falling through to plain generation here would leave it able to read
+        # the roster and unable to call anyone on it.
+        tool_schemas = tools_to_openai_format(context.available_tools) if context.available_tools and mcp else []
+        agent_schemas = agents_to_openai_format(context.available_agents)
+        call_schemas = tool_schemas + agent_schemas
+        if not call_schemas:
+            # Neither tools nor peers — plain LLM text generation.
             text, plain_record = await self._default_executor.execute_step(step, context)
             return _StepOutcome(text=text, llm_record=plain_record)
 
@@ -436,7 +487,7 @@ class ActPhase:
             completion = await self._llm.complete_with_tools(
                 config=context.model_config,
                 messages=self._build_step_messages(step, context, prior_results),
-                tools=tool_schemas,
+                tools=call_schemas,
             )
         except LLMBudgetExceededError:
             raise
@@ -463,8 +514,18 @@ class ActPhase:
         name_map = build_openai_tool_name_map(context.available_tools)
         single = len(completion.tool_calls) == 1
         tool_results: list[tuple[str, ToolCallRecord]] = []
+        agent_results: list[tuple[str, bool]] = []
 
         for call in completion.tool_calls:
+            # Peers are resolved before tools. Both arrive as function calls, and
+            # only the peer name map can tell them apart.
+            peer_id = agent_name_map.get(call.name)
+            if peer_id:
+                question = str(call.arguments.get("question") or "").strip() or step.description
+                log.debug("act.step.consulting_agent", to_agent_id=peer_id, action=step.action, component="act")
+                agent_results.append(await consult_peer(to_agent_id=peer_id, question=question, context=context))
+                continue
+
             # Translate back through the sanitisation applied when the schemas
             # were built (issue #772) — the model echoes the sanitized name.
             tool_name = name_map.get(call.name, call.name)
@@ -475,7 +536,7 @@ class ActPhase:
                 tool_args=dict(call.arguments),
             )
 
-            if not mcp.can_handle(tool_step):
+            if mcp is None or not mcp.can_handle(tool_step):
                 log.warning("act.step.mcp_cannot_handle", tool=tool_name, component="act")
                 if single:
                     # Preserve the historical single-tool path: fall through to
@@ -534,7 +595,26 @@ class ActPhase:
             text=completion.text,
             llm_record=completion.record,
             tool_results=tool_results,
+            agent_results=agent_results,
         )
+
+    async def _consult_planned_peer(
+        self,
+        step: PlanStep,
+        context: RunContext,
+        to_agent_id: str,
+    ) -> _StepOutcome:
+        """Execute a consultation the Plan phase already decided on.
+
+        The mirror of the planned-tool branch: a caller that named the peer owns
+        that decision, so it is dispatched rather than re-chosen. ``question``
+        falls back to the step description because a plan can name the peer and
+        omit the argument.
+        """
+        question = str((step.tool_args or {}).get("question") or "").strip() or step.description
+        log.debug("act.step.using_planned_agent", to_agent_id=to_agent_id, component="act")
+        result = await consult_peer(to_agent_id=to_agent_id, question=question, context=context)
+        return _StepOutcome(text="", llm_record=None, agent_results=[result])
 
     async def _select_tool_fallback(
         self,
@@ -547,6 +627,15 @@ class ActPhase:
         Asks the model to name a tool from a textual catalogue instead of
         binding schemas. One call per turn, and the selection is a separate
         completion from the one that reasoned about the step.
+
+        Peers are deliberately absent here. This path exists because the model
+        rejected a ``tools`` payload, and function calling is the only channel
+        through which a consultation can be chosen — a model that cannot use one
+        cannot consult a peer, and inventing a second, prose-named channel for it
+        would mean a peer reachable one way and not the other. The roster still
+        reaches Reason and Plan, so the model is never told about a peer it can
+        then be silently unable to reach mid-step; the callable set simply
+        narrows to tools.
         """
         from motoro.mcp.adapters import MCPToolExecutor
         from motoro.schemas.llm import PlanStep as _PlanStep

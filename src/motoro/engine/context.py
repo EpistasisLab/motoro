@@ -17,6 +17,7 @@ from pydantic import BaseModel
 from motoro.schemas.agent import ModelConfig
 
 if TYPE_CHECKING:
+    from motoro.engine.ports import AgentMessengerPort
     from motoro.memory.working import WorkingMemoryManager
 
 _log = structlog.get_logger()
@@ -74,6 +75,20 @@ class RunContext:
     # Available MCP tools (populated by Sense, consumed by Plan/Act)
     available_tools: list[dict[str, Any]] = field(default_factory=list)
 
+    # Peer agents this run may consult, as A2A-shaped capability descriptors
+    # ({"agent_id", "name", "description", "skills", "metadata"}). Route 1
+    # (Capability) in SensePhase's three-route contract: resolved by the caller
+    # before the engine starts, forwarded by Sense, never gathered by a phase.
+    #
+    # Deliberately NOT folded into ``available_tools``. That list is an MCP
+    # catalogue allow-list -- ``MCPToolExecutor`` resolves every entry through
+    # the registry, records each call as a ``ToolCallRecord``, and surfaces the
+    # result as a ``tool_result`` artifact. A peer is none of those things, and
+    # its reachability is authorized by the caller's own agent topology rather
+    # than by a tool grant. Act projects these into callable function schemas
+    # and dispatches them through ``AgentMessengerPort`` instead.
+    available_agents: list[dict[str, Any]] = field(default_factory=list)
+
     # Memory context (populated by Sense from memory service)
     memories: list[dict[str, Any]] = field(default_factory=list)
 
@@ -86,6 +101,14 @@ class RunContext:
 
     # Optional Redis-backed working memory (injected by runtime when configured)
     working_memory_manager: WorkingMemoryManager | None = field(default=None)
+
+    # How a chosen peer consultation is actually delivered (injected by the
+    # caller alongside ``available_agents``). Lives on the context, not only on
+    # ActPhase, because the default execution pattern is ``reason_act``, which
+    # runs its own tool-call loop and never touches ActPhase -- one source both
+    # paths read beats two that drift. Not part of the snapshot: it is a live
+    # object, and a resumed run is re-injected with a fresh one.
+    agent_messenger: AgentMessengerPort | None = field(default=None)
 
     # Token tracking across all phases in this run
     total_prompt_tokens: int = 0
@@ -222,6 +245,7 @@ class RunContext:
             "phase_outputs": serialized_outputs,
             "conversation_history": self.conversation_history,
             "available_tools": self.available_tools,
+            "available_agents": self.available_agents,
             "memories": self.memories,
             "skills": self.skills,
             "total_prompt_tokens": self.total_prompt_tokens,
@@ -260,6 +284,7 @@ class RunContext:
             phase_outputs=phase_outputs,
             conversation_history=data.get("conversation_history", []),
             available_tools=data.get("available_tools", []),
+            available_agents=data.get("available_agents", []),
             memories=data.get("memories", []),
             skills=data.get("skills", []),
             total_prompt_tokens=data.get("total_prompt_tokens", 0),
