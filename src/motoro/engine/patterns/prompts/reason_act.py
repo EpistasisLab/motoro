@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from motoro.engine.agent_channel import format_agents_for_prompt
 from motoro.schemas.llm import SenseOutput
 
 FINAL_ANSWER_TOOL = "final_answer"
@@ -115,6 +116,15 @@ def build_initial_messages(
         messages.append({"role": "system", "content": skill_index})
 
     context_parts: list[str] = [f"Goal: {sense_output.agent_goal}"]
+
+    # Peers are bound as functions the way tools are, but unlike a tool they
+    # need framing -- a bare schema reads as a lookup. This loop skips the
+    # Reason phase, so this stable prefix is the only place that framing can
+    # live, and it is stable for the same reason the skill index is.
+    if sense_output.available_agents:
+        agents_section = format_agents_for_prompt(sense_output.available_agents)
+        if agents_section:
+            context_parts.append(agents_section)
 
     if sense_output.memories:
         memory_texts = [str(m.get("content", "")) for m in sense_output.memories]

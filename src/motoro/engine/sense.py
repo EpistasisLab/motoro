@@ -27,10 +27,13 @@ class SensePhase:
     is this phase:
 
     1. **Capability** — the model, the execution pattern, the tool set, the
-       skills. Resolved before the engine starts and carried on
-       :class:`~motoro.engine.context.RunContext` as configuration. These change
-       what the agent *can do*; they are never prose in a prompt, so there is
-       nothing for a perception step to collect.
+       skills, the peer agents this run may consult. Resolved before the engine
+       starts and carried on :class:`~motoro.engine.context.RunContext` as
+       configuration. These change what the agent *can do*; they are never prose
+       in a prompt, so there is nothing for a perception step to collect.
+       ``available_agents`` is forwarded here for the phases downstream exactly
+       as ``available_tools`` is — Sense does not discover peers, and a change
+       that has it start doing so has misplaced the work.
     2. **Reference** — an id pointing at data that lives somewhere else: a
        workspace, a dataset, an artifact. Bound into every MCP tool call's
        ambient request ``_meta`` (``RunContext.workspace_id`` and
@@ -68,7 +71,7 @@ class SensePhase:
     async def execute(self, context: RunContext) -> PhaseResult:
         """Retrieve memories if configured, then snapshot the context as SenseOutput.
 
-        The five non-memory fields of the output are copies of values
+        The six non-memory fields of the output are copies of values
         ``RunContext`` already held on entry — this phase does not source them.
         Note that not every pattern reads them back: ReAct, for one, consumes
         only ``agent_goal``/``memories``/``user_input`` and re-reads the rest off
@@ -103,6 +106,7 @@ class SensePhase:
             system_prompt=context.system_prompt,
             conversation_history=context.conversation_history,
             available_tools=context.available_tools,
+            available_agents=context.available_agents,
             memories=memories,
         )
         return PhaseResult(output=output, llm_call=None)

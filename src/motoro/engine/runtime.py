@@ -14,6 +14,7 @@ import structlog
 from opentelemetry import trace
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from motoro.engine.agent_channel import build_agent_name_map
 from motoro.engine.context import RunContext
 from motoro.engine.phase import Phase, PhaseResult
 from motoro.engine.skills import inline_skills
@@ -24,7 +25,7 @@ from motoro.schemas.agent import ModelConfig
 from motoro.schemas.llm import ActOutput, PlanOutput
 
 if TYPE_CHECKING:
-    from motoro.engine.ports import MemoryServicePort
+    from motoro.engine.ports import AgentMessengerPort, MemoryServicePort
     from motoro.memory.working import WorkingMemoryConfig, WorkingMemoryManager
     from motoro.services.llm_service import LLMService
 
@@ -90,10 +91,12 @@ class AgentRuntime:
         cancel_event: asyncio.Event | None = None,
         pause_event: asyncio.Event | None = None,
         publish_event: EventPublisher | None = None,
+        agent_messenger: AgentMessengerPort | None = None,
     ) -> None:
         self._config = config
         self._phases = phases
         self._db = db
+        self._agent_messenger = agent_messenger
         self._memory_service = memory_service
         self._working_memory_config = working_memory_config
         self._llm_service = llm_service
@@ -217,6 +220,7 @@ class AgentRuntime:
         run_id: uuid.UUID,
         user_input: str,
         available_tools: list[dict[str, Any]] | None = None,
+        available_agents: list[dict[str, Any]] | None = None,
         resume_context: RunContext | None = None,
         resume_phase: str | None = None,
     ) -> AgentRunResult:
@@ -226,6 +230,9 @@ class AgentRuntime:
             run_id: ID of the AgentRun record (already created by the caller).
             user_input: The user's query or goal input.
             available_tools: MCP tools to make available to the agent.
+            available_agents: Peer agents this run may consult (see
+                ``RunContext.available_agents``). Dispatched through the
+                ``AgentMessengerPort`` the caller injected, never through MCP.
             resume_context: If resuming, the deserialized RunContext.
             resume_phase: If resuming, the phase to resume from (e.g. "plan").
 
@@ -242,6 +249,7 @@ class AgentRuntime:
                 user_input=user_input,
                 max_iterations=self._config.max_iterations,
                 available_tools=available_tools or [],
+                available_agents=available_agents or [],
                 agent_id=self._config.agent_id,
                 agent_name=self._config.name or None,
                 skills=self._config.skills or [],
@@ -249,6 +257,10 @@ class AgentRuntime:
                 owner_id=self._llm_service.principal_id if self._llm_service else None,
             )
         context.memory_config_data = self._config.memory_config_data or {}
+        # Set on both branches deliberately: a messenger is a live object that
+        # cannot survive a snapshot, so a resumed run must be re-injected with
+        # the one this process was handed.
+        context.agent_messenger = self._agent_messenger
 
         # The bare runtime has no patterns, so nothing here can offer the model
         # a ``load_skill`` tool — skills only reach it inlined. Flagged in
@@ -337,7 +349,7 @@ class AgentRuntime:
                                 # copy is stored back into phase_outputs so Act
                                 # uses the cleaned version.
                                 validated_plan = plan_output.model_copy(deep=True)
-                                _validate_plan_tools(validated_plan, context.available_tools)
+                                _validate_plan_tools(validated_plan, context.available_tools, context.available_agents)
                                 context.phase_outputs["plan"] = validated_plan
                                 actions_taken.extend(s.action for s in validated_plan.steps)
 
@@ -673,10 +685,19 @@ def _prev_phase(phase_name: str) -> str | None:
     return order[idx - 1] if idx > 0 else None
 
 
-def _validate_plan_tools(plan: PlanOutput, available_tools: list[dict[str, Any]]) -> None:
-    """Validate that PlanStep.tool_name values match available tools.
+def _validate_plan_tools(
+    plan: PlanOutput,
+    available_tools: list[dict[str, Any]],
+    available_agents: list[dict[str, Any]] | None = None,
+) -> None:
+    """Validate that PlanStep.tool_name values match available tools or peers.
 
     Invalid tool names are cleared to None so the Act phase falls back to LLM.
+
+    A planned peer consultation arrives in the same ``tool_name`` slot (that is
+    how Plan can express one at all), so the peer function names count as valid
+    here. Without this, an agent whose only capability is a peer has every
+    consultation it plans stripped out before Act ever sees it.
     """
     if not plan.steps:
         return
@@ -690,6 +711,7 @@ def _validate_plan_tools(plan: PlanOutput, available_tools: list[dict[str, Any]]
             valid_names.add(full_name)
         if bare_name:
             valid_names.add(bare_name)
+    valid_names.update(build_agent_name_map(available_agents or []))
 
     if not valid_names:
         for step in plan.steps:

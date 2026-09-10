@@ -42,6 +42,7 @@ def _is_json_safe(value: Any) -> bool:
         return False
     return True
 
+
 # What an agent gets when it configures no execution pattern at all (M112).
 #
 # The tool-calling loop, not the baseline. With tools it is the only one of the
@@ -202,6 +203,7 @@ class PatternOrchestrator:
         run_id: uuid.UUID,
         user_input: str,
         available_tools: list[dict[str, Any]] | None = None,
+        available_agents: list[dict[str, Any]] | None = None,
         resume_context: RunContext | None = None,
         resume_phase: str | None = None,
         run_metadata: dict[str, Any] | None = None,
@@ -224,6 +226,7 @@ class PatternOrchestrator:
                 user_input=user_input,
                 max_iterations=rt._config.max_iterations,
                 available_tools=available_tools or [],
+                available_agents=available_agents or [],
                 agent_id=rt._config.agent_id,
                 agent_name=rt._config.name or None,
                 skills=rt._config.skills or [],
@@ -238,6 +241,10 @@ class PatternOrchestrator:
             # worked (AgentRuntime._episodic_memory_enabled reads rt._config
             # directly, not context), so memory was written but never recalled.
             context.memory_config_data = rt._config.memory_config_data or {}
+
+        # Outside the else above: a messenger is a live object no snapshot can
+        # carry, so a resumed run needs the one this process was handed.
+        context.agent_messenger = rt._agent_messenger
 
         # Working memory (returns None if Redis unavailable)
         wm = None
@@ -264,11 +271,7 @@ class PatternOrchestrator:
             if not context.ambient_meta:
                 ambient = run_metadata.get("ambient_meta")
                 if isinstance(ambient, dict):
-                    context.ambient_meta = {
-                        str(k): v
-                        for k, v in ambient.items()
-                        if k and _is_json_safe(v)
-                    }
+                    context.ambient_meta = {str(k): v for k, v in ambient.items() if k and _is_json_safe(v)}
 
         # Expose runtime to plugins that need LLM access (e.g., ReasonAct)
         context.metadata["_runtime"] = rt
@@ -311,9 +314,7 @@ class PatternOrchestrator:
         # metadata flag rather than by "is this a resume", because the inlined
         # prompt is itself part of the snapshot — re-inlining on resume would
         # duplicate every skill body.
-        _skills_handled = context.metadata.get(_KEY_SKILLS_INLINED) or any(
-            p.consumes_skills for p in self._plugins
-        )
+        _skills_handled = context.metadata.get(_KEY_SKILLS_INLINED) or any(p.consumes_skills for p in self._plugins)
         if context.skills and not _skills_handled:
             context.system_prompt = inline_skills(context.system_prompt, context.skills)
             context.metadata[_KEY_SKILLS_INLINED] = True
@@ -457,7 +458,7 @@ class PatternOrchestrator:
                             if isinstance(plan_output, PlanOutput):
                                 from motoro.engine.runtime import _validate_plan_tools
 
-                                _validate_plan_tools(plan_output, context.available_tools)
+                                _validate_plan_tools(plan_output, context.available_tools, context.available_agents)
                                 # Issue #993: extend from effective_output (post-hook).
                                 actions_taken.extend(s.action for s in plan_output.steps)
 

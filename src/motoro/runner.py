@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from motoro.engine.phase import Phase
-    from motoro.engine.ports import MemoryServicePort
+    from motoro.engine.ports import AgentMessengerPort, MemoryServicePort
     from motoro.engine.runtime import AgentRunResult
     from motoro.mcp.registry import MCPServerRegistry
 
@@ -123,11 +123,17 @@ def build_phases(
     *,
     registry: MCPServerRegistry | None = None,
     memory_service: MemoryServicePort | None = None,
+    agent_messenger: AgentMessengerPort | None = None,
 ) -> dict[str, Phase]:
     """Build the four SRPA phase objects.
 
     Exposed because substituting one phase is a reasonable thing to want, and
     doing it here beats reimplementing the dict.
+
+    *agent_messenger* is separate from *registry* rather than folded into the
+    executor: a peer consultation is not a tool call, and ``MCPToolExecutor``
+    keeps its current meaning precisely because nothing about agent topology
+    reaches it.
     """
     from motoro.engine.act import ActPhase
     from motoro.engine.plan import PlanPhase
@@ -140,7 +146,7 @@ def build_phases(
         "sense": SensePhase(memory_service=memory_service),
         "reason": ReasonPhase(llm_service=llm),
         "plan": PlanPhase(llm_service=llm),
-        "act": ActPhase(llm_service=llm, mcp_executor=mcp_executor),
+        "act": ActPhase(llm_service=llm, mcp_executor=mcp_executor, agent_messenger=agent_messenger),
     }
 
 
@@ -472,6 +478,8 @@ async def execute_run(
     registry: MCPServerRegistry | None = None,
     memory_service: MemoryServicePort | None = None,
     available_tools: list[dict[str, Any]] | None = None,
+    available_agents: list[dict[str, Any]] | None = None,
+    agent_messenger: AgentMessengerPort | None = None,
     cancel_event: asyncio.Event | None = None,
     pause_event: asyncio.Event | None = None,
     publish_event: Any = None,
@@ -506,6 +514,15 @@ async def execute_run(
     before the effective :class:`ModelConfig` is built — a per-run key wins over
     the agent's own stored value for that key; anything the run doesn't override
     still comes from the agent.
+
+    *available_agents* and *agent_messenger* travel together and are the whole
+    agent-to-agent surface: the first says which peers this run may consult, the
+    second is how a chosen consultation is delivered. Core authorizes neither —
+    it projects the declared peers into callable schemas and hands any resulting
+    call back to the messenger, which owns identity, ordering, transcript and
+    budget. Passing peers without a messenger is a no-op, and a model that cannot
+    accept function schemas gets no callable peers at all (the pattern falls back
+    to ``single_agent_baseline`` above).
     """
     from motoro.engine.patterns.orchestrator import DEFAULT_EXECUTION_PATTERN, PatternOrchestrator
     from motoro.engine.runtime import AgentConfig, AgentRuntime
@@ -539,7 +556,7 @@ async def execute_run(
         llm = llm_service or LLMService(principal_id=principal_id or run.owner_id)
         runtime = AgentRuntime(
             config=config,
-            phases=build_phases(llm, registry=registry, memory_service=memory_service),
+            phases=build_phases(llm, registry=registry, memory_service=memory_service, agent_messenger=agent_messenger),
             db=db,
             memory_service=memory_service,
             working_memory_config=WorkingMemoryConfig(),
@@ -547,6 +564,7 @@ async def execute_run(
             cancel_event=cancel_event,
             pause_event=pause_event,
             publish_event=publish_event,
+            agent_messenger=agent_messenger,
         )
 
         default_pattern = (
@@ -562,6 +580,7 @@ async def execute_run(
             run_id=run.id,
             user_input=run.input,
             available_tools=available_tools,
+            available_agents=available_agents,
             run_metadata=run.run_metadata,
         )
 
