@@ -769,13 +769,23 @@ class LLMService:
             },
         ) as span:
             try:
+                # litellm's azure_ai route rejects an explicit tool_choice
+                # (UnsupportedParamsError) even though every chat endpoint
+                # defaults to auto when tools are present -- and auto is all
+                # this call ever asked for. Send the param only where the
+                # model's param table supports it.
+                tool_choice_kwargs = (
+                    {"tool_choice": "auto"}
+                    if "tool_choice" in (litellm.get_supported_openai_params(model=model_str) or [])
+                    else {}
+                )
                 # Issue #635: apply asyncio.wait_for with configured timeout
                 response = await asyncio.wait_for(
                     litellm.acompletion(
                         model=model_str,
                         messages=cached_messages,
                         tools=cached_tools if cached_tools is not None else tools,
-                        tool_choice="auto",
+                        **tool_choice_kwargs,
                         **_sampling_kwargs(config, model_str),
                         max_tokens=config.max_tokens,
                         api_key=conn["api_key"],
