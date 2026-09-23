@@ -701,10 +701,13 @@ async def test_a_bundle_round_trips_into_resolve_skills() -> None:
     )
     assert bundle_paths(skill) == ["FORMS.md", "references/schema.md"]
 
-    # Contents come back eagerly: engine.skills is pure functions with no
-    # session to lazy-load through mid-turn.
+    # Contents and their storage encoding come back eagerly: engine.skills is
+    # pure functions with no session to lazy-load through mid-turn.
     resolved = await resolve_skills({"skill_ids": [skill.id]}, owner_id=owner)
-    assert resolved[0]["files"] == {"FORMS.md": "form text", "references/schema.md": "schema text"}
+    assert resolved[0]["files"] == {
+        "FORMS.md": {"content": "form text", "encoding": "utf-8"},
+        "references/schema.md": {"content": "schema text", "encoding": "utf-8"},
+    }
 
 
 @needs_db
