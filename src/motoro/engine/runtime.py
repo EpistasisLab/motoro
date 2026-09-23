@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from motoro.engine.agent_channel import build_agent_name_map
 from motoro.engine.context import RunContext
 from motoro.engine.phase import Phase, PhaseResult
-from motoro.engine.skills import inline_skills
+from motoro.engine.skills import inline_skills, select_relevant_skills
 from motoro.models.run import RunStatus, RunStep, StepPhase
 from motoro.observability.metrics import record_error, record_phase, record_run
 from motoro.observability.tracing import get_tracer
@@ -268,6 +268,15 @@ class AgentRuntime:
         # prompt) does not inline them again. See PatternOrchestrator.run, which
         # does the same thing conditionally on the active patterns.
         if context.skills and not context.metadata.get("skills_inlined"):
+            context.skills, selection_record = await select_relevant_skills(
+                self._llm_service, context.model_config, context.user_input, context.skills
+            )
+            if selection_record:
+                await context.add_llm_usage(
+                    selection_record.prompt_tokens,
+                    selection_record.completion_tokens,
+                    selection_record.cost_estimate,
+                )
             context.system_prompt = inline_skills(context.system_prompt, context.skills)
             context.metadata["skills_inlined"] = True
 

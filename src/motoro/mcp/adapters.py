@@ -509,6 +509,22 @@ def tools_to_openai_format(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
         bare_name = str(tool.get("tool_name") or tool.get("name", "unknown"))
         safe_name = _sanitize_openai_tool_name(bare_name)
         description = str(tool.get("description", ""))
+        server_instructions = str(tool.get("server_instructions", "")).strip()
+        if server_instructions:
+            description = f"{server_instructions}\n\n{description}" if description else server_instructions
+        title = str(tool.get("title", "")).strip()
+        output_schema = tool.get("output_schema")
+        annotations = tool.get("annotations")
+        metadata: list[str] = []
+        if title:
+            metadata.append(f"Title: {title}")
+        if isinstance(output_schema, dict) and output_schema:
+            metadata.append(f"Output schema: {json.dumps(output_schema, separators=(',', ':'))}")
+        if isinstance(annotations, dict) and annotations:
+            metadata.append(f"Annotations: {json.dumps(annotations, separators=(',', ':'))}")
+        if metadata:
+            description = f"{description}\n\n" if description else ""
+            description += "\n".join(metadata)
         schema = tool.get("input_schema") or {}
         if not isinstance(schema, dict):
             schema = {}

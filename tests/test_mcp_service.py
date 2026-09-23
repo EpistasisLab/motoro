@@ -90,6 +90,31 @@ async def _with_timeout(coro: Any) -> Any:
     return await asyncio.wait_for(coro, timeout=_LIVE_TIMEOUT)
 
 
+def test_native_tool_schema_keeps_mcp_discovery_metadata() -> None:
+    from motoro.mcp.adapters import tools_to_openai_format
+
+    [tool] = tools_to_openai_format(
+        [
+            {
+                "name": "lookup",
+                "description": "Look up one record.",
+                "server_instructions": "Use record IDs from the active workspace.",
+                "title": "Record lookup",
+                "input_schema": {"type": "object", "properties": {"id": {"type": "string"}}},
+                "output_schema": {"type": "object", "required": ["record"]},
+                "annotations": {"readOnlyHint": True},
+            }
+        ]
+    )
+
+    function = tool["function"]
+    assert function["parameters"]["properties"]["id"]["type"] == "string"
+    assert "Use record IDs from the active workspace." in function["description"]
+    assert "Title: Record lookup" in function["description"]
+    assert '"required":["record"]' in function["description"]
+    assert '"readOnlyHint":true' in function["description"]
+
+
 # --------------------------------------------------------------------------- #
 #  Model shape — same severance as Agent/AgentRun/MemoryEntry                  #
 # --------------------------------------------------------------------------- #

@@ -243,6 +243,10 @@ class MCPServerRegistry:
                             "tool_name": tool.name,
                             "description": tool.description,
                             "input_schema": tool.input_schema,
+                            "title": tool.title,
+                            "output_schema": tool.output_schema,
+                            "annotations": tool.annotations,
+                            "server_instructions": entry.client.instructions,
                         }
                     )
         return tools

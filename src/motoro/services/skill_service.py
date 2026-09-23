@@ -30,6 +30,7 @@ may pass it to.
 
 from __future__ import annotations
 
+import base64
 import logging
 import re
 import uuid
@@ -98,6 +99,7 @@ class ParsedSkill:
     name: str
     description: str
     body: str
+    frontmatter: dict[str, object]
 
 
 @dataclass(frozen=True)
@@ -111,7 +113,7 @@ class ParsedSkillBundle:
     """
 
     skill: ParsedSkill
-    files: tuple[tuple[str, str], ...]
+    files: tuple[tuple[str, str, str], ...]
 
 
 def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
@@ -188,7 +190,23 @@ def parse_skill_markdown(text: str) -> ParsedSkill:
     name = validate_skill_name(str(loaded.get("name") or "").strip())
     description = validate_skill_description(str(loaded.get("description") or ""))
     body = text[match.end() :].strip()
-    return ParsedSkill(name=name, description=description, body=body)
+    optional: dict[str, object] = {}
+    for key in ("license", "compatibility", "metadata", "allowed-tools"):
+        if key in loaded:
+            optional[key] = loaded[key]
+    compatibility = optional.get("compatibility")
+    if compatibility is not None and (not isinstance(compatibility, str) or not 1 <= len(compatibility) <= 500):
+        raise SkillFormatError("Skill compatibility must be a non-empty string of at most 500 characters.")
+    metadata = optional.get("metadata")
+    if metadata is not None and (
+        not isinstance(metadata, dict)
+        or any(not isinstance(k, str) or not isinstance(v, str) for k, v in metadata.items())
+    ):
+        raise SkillFormatError("Skill metadata must map string keys to string values.")
+    for key in ("license", "allowed-tools"):
+        if key in optional and not isinstance(optional[key], str):
+            raise SkillFormatError(f"Skill {key} must be a string.")
+    return ParsedSkill(name=name, description=description, body=body, frontmatter=optional)
 
 
 def render_skill_md(skill: Skill | ParsedSkill) -> str:
@@ -202,7 +220,7 @@ def render_skill_md(skill: Skill | ParsedSkill) -> str:
     a quote survives the trip.
     """
     front = yaml.safe_dump(
-        {"name": skill.name, "description": skill.description},
+        {"name": skill.name, "description": skill.description, **dict(getattr(skill, "frontmatter", {}) or {})},
         sort_keys=False,
         allow_unicode=True,
         default_flow_style=False,
@@ -214,19 +232,6 @@ def render_skill_md(skill: Skill | ParsedSkill) -> str:
 # --------------------------------------------------------------------------- #
 #  Bundles (the directory form)                                                #
 # --------------------------------------------------------------------------- #
-
-# Extensions core will store as a bundled level-3 file. An allow-list rather
-# than a deny-list: the question is not "is this dangerous" but "can a Motoro
-# agent do anything at all with it", and the only answer is "read it into the
-# context window". Anything outside this list either needs a shell (a script)
-# or cannot enter a context window (an image, a font, a .docx), so storing it
-# would be storing something no run can ever reach.
-BUNDLE_TEXT_SUFFIXES = frozenset({".md", ".markdown", ".txt", ".json", ".yaml", ".yml", ".csv", ".toml"})
-
-# Suffixes worth naming in the error, because they are the ones a real skill
-# from the wild actually ships and whose rejection therefore needs explaining
-# rather than merely reporting.
-_SCRIPT_SUFFIXES = frozenset({".py", ".sh", ".bash", ".js", ".ts", ".rb", ".pl", ".ps1"})
 
 
 def _normalise_bundle_path(path: str) -> str:
@@ -247,9 +252,8 @@ def validate_bundle_path(path: str) -> str:
     """Return *path* normalised for storage, or raise :class:`SkillFormatError`.
 
     Normalised means: forward slashes, no leading ``./``, relative to the skill
-    directory. Rejected means anything that is not a plain relative path to a
-    readable text file — absolute paths, ``..`` traversal, hidden segments, and
-    the suffixes outside :data:`BUNDLE_TEXT_SUFFIXES`.
+    directory. Rejected means anything that is not a plain relative resource
+    path: absolute paths, ``..`` traversal, and hidden segments.
 
     The traversal checks matter even though nothing here touches a filesystem:
     a product rendering a bundle back out to disk (the ``render_skill_md``
@@ -273,26 +277,22 @@ def validate_bundle_path(path: str) -> str:
         # .git, .DS_Store and friends: a folder picker hands over the whole
         # subtree, and none of it is part of the skill.
         raise SkillFormatError(f"Bundled file path '{cleaned}' may not contain hidden segments.")
-    suffix = ("." + segments[-1].rsplit(".", 1)[-1].lower()) if "." in segments[-1] else ""
-    if suffix in _SCRIPT_SUFFIXES:
-        raise SkillFormatError(
-            f"'{cleaned}' is a script, and a Motoro agent has no shell to run one in — its only "
-            "way to act is an MCP tool call. Register the code as an MCP server instead, and keep "
-            "the skill to the instructions that say when to call it."
-        )
-    if suffix not in BUNDLE_TEXT_SUFFIXES:
-        allowed = ", ".join(sorted(BUNDLE_TEXT_SUFFIXES))
-        raise SkillFormatError(
-            f"'{cleaned}' is not a text file a skill can be read from. A bundled file reaches an "
-            f"agent by being read into its context window, so it must be one of: {allowed}."
-        )
     return cleaned
 
 
-def parse_skill_bundle(files: Iterable[tuple[str, str]]) -> ParsedSkillBundle:
+def _encoded_resource(content: str | bytes) -> tuple[str, str]:
+    if isinstance(content, str):
+        return content, "utf-8"
+    try:
+        return content.decode("utf-8"), "utf-8"
+    except UnicodeDecodeError:
+        return base64.b64encode(content).decode("ascii"), "base64"
+
+
+def parse_skill_bundle(files: Iterable[tuple[str, str | bytes]]) -> ParsedSkillBundle:
     """Parse a whole skill directory into its ``SKILL.md`` and level-3 files.
 
-    *files* is ``(relative path, text)`` pairs — relative to the skill
+    *files* is ``(relative path, text-or-bytes)`` pairs — relative to the skill
     directory itself, so ``SKILL.md`` and ``references/schema.md``, not
     ``code-simplification/SKILL.md``. Stripping the leading directory segment is
     the caller's job, because only the caller knows whether the user picked the
@@ -305,18 +305,22 @@ def parse_skill_bundle(files: Iterable[tuple[str, str]]) -> ParsedSkillBundle:
     """
     entries = list(files)
     skill_md: str | None = None
-    bundled: list[tuple[str, str]] = []
+    bundled: list[tuple[str, str, str]] = []
     total_bytes = 0
 
-    for raw_path, text in entries:
+    for raw_path, raw_content in entries:
         normalised = _normalise_bundle_path(raw_path)
         if normalised.lower() == SKILL_MD.lower():
             if skill_md is not None:
                 raise SkillFormatError("That folder contains more than one SKILL.md.")
-            skill_md = text
+            try:
+                skill_md = raw_content if isinstance(raw_content, str) else raw_content.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise SkillFormatError("SKILL.md must be UTF-8 text.") from exc
             continue
-        bundled.append((validate_bundle_path(raw_path), text))
-        total_bytes += len(text.encode("utf-8"))
+        content, encoding = _encoded_resource(raw_content)
+        bundled.append((validate_bundle_path(raw_path), content, encoding))
+        total_bytes += len(raw_content.encode("utf-8") if isinstance(raw_content, str) else raw_content)
 
     if skill_md is None:
         raise SkillFormatError(
@@ -325,9 +329,7 @@ def parse_skill_bundle(files: Iterable[tuple[str, str]]) -> ParsedSkillBundle:
             "the folder containing it."
         )
     if len(bundled) > MAX_BUNDLE_FILES:
-        raise SkillFormatError(
-            f"That skill bundles {len(bundled)} files, more than the {MAX_BUNDLE_FILES} limit."
-        )
+        raise SkillFormatError(f"That skill bundles {len(bundled)} files, more than the {MAX_BUNDLE_FILES} limit.")
     if total_bytes > MAX_BUNDLE_BYTES:
         raise SkillFormatError(
             f"That skill's bundled files total {total_bytes // 1000}KB, more than the "
@@ -335,7 +337,7 @@ def parse_skill_bundle(files: Iterable[tuple[str, str]]) -> ParsedSkillBundle:
         )
 
     seen: set[str] = set()
-    for path, _text in bundled:
+    for path, _text, _encoding in bundled:
         lowered = path.lower()
         if lowered in seen:
             raise SkillFormatError(f"That folder contains '{path}' more than once (paths are case-insensitive).")
@@ -359,10 +361,11 @@ async def create_skill(
     name: str,
     description: str,
     body: str = "",
+    frontmatter: dict[str, object] | None = None,
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
     source_filename: str | None = None,
-    files: Iterable[tuple[str, str]] = (),
+    files: Iterable[tuple[str, str, str] | tuple[str, str]] = (),
 ) -> Skill:
     """Persist a skill from already-separated fields.
 
@@ -376,12 +379,18 @@ async def create_skill(
         name=validate_skill_name(name.strip()),
         description=validate_skill_description(description),
         body=body.strip(),
+        frontmatter=dict(frontmatter or {}),
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
         files=[
-            SkillFile(path=validate_bundle_path(path), content=content, position=index)
-            for index, (path, content) in enumerate(files)
+            SkillFile(
+                path=validate_bundle_path(item[0]),
+                content=item[1],
+                encoding=item[2] if len(item) == 3 else "utf-8",
+                position=index,
+            )
+            for index, item in enumerate(files)
         ],
     )
     async with _session("create_skill") as db:
@@ -404,6 +413,7 @@ async def create_skill_from_markdown(
         name=parsed.name,
         description=parsed.description,
         body=parsed.body,
+        frontmatter=parsed.frontmatter,
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
@@ -411,7 +421,7 @@ async def create_skill_from_markdown(
 
 
 async def create_skill_from_bundle(
-    files: Iterable[tuple[str, str]],
+    files: Iterable[tuple[str, str | bytes]],
     *,
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
@@ -428,6 +438,7 @@ async def create_skill_from_bundle(
         name=bundle.skill.name,
         description=bundle.skill.description,
         body=bundle.skill.body,
+        frontmatter=bundle.skill.frontmatter,
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
@@ -465,7 +476,8 @@ async def update_skill(
     name: str | None = None,
     description: str | None = None,
     body: str | None = None,
-    files: Iterable[tuple[str, str]] | None = None,
+    frontmatter: dict[str, object] | None = None,
+    files: Iterable[tuple[str, str, str] | tuple[str, str]] | None = None,
 ) -> Skill | None:
     """Update a live skill. ``None`` means "leave unchanged" for every field.
 
@@ -488,10 +500,17 @@ async def update_skill(
             skill.description = validate_skill_description(description)
         if body is not None:
             skill.body = body.strip()
+        if frontmatter is not None:
+            skill.frontmatter = dict(frontmatter)
         if files is not None:
             replacements = [
-                SkillFile(path=validate_bundle_path(path), content=content, position=index)
-                for index, (path, content) in enumerate(files)
+                SkillFile(
+                    path=validate_bundle_path(item[0]),
+                    content=item[1],
+                    encoding=item[2] if len(item) == 3 else "utf-8",
+                    position=index,
+                )
+                for index, item in enumerate(files)
             ]
             # Two flushes, deliberately. Clearing the collection is what fires
             # delete-orphan; flushing before the inserts is what stops a
@@ -514,10 +533,16 @@ async def update_skill_from_markdown(skill_id: uuid.UUID, text: str) -> Skill | 
     Use :func:`update_skill_from_bundle` to replace the whole directory.
     """
     parsed = parse_skill_markdown(text)
-    return await update_skill(skill_id, name=parsed.name, description=parsed.description, body=parsed.body)
+    return await update_skill(
+        skill_id,
+        name=parsed.name,
+        description=parsed.description,
+        body=parsed.body,
+        frontmatter=parsed.frontmatter,
+    )
 
 
-async def update_skill_from_bundle(skill_id: uuid.UUID, files: Iterable[tuple[str, str]]) -> Skill | None:
+async def update_skill_from_bundle(skill_id: uuid.UUID, files: Iterable[tuple[str, str | bytes]]) -> Skill | None:
     """Replace a live skill's whole directory from a re-uploaded folder."""
     bundle = parse_skill_bundle(files)
     return await update_skill(
@@ -525,6 +550,7 @@ async def update_skill_from_bundle(skill_id: uuid.UUID, files: Iterable[tuple[st
         name=bundle.skill.name,
         description=bundle.skill.description,
         body=bundle.skill.body,
+        frontmatter=bundle.skill.frontmatter,
         files=bundle.files,
     )
 
@@ -632,7 +658,8 @@ async def resolve_skills(
                 "name": skill.name,
                 "description": skill.description,
                 "body": skill.body or "",
-                "files": {f.path: f.content for f in skill.files},
+                "frontmatter": dict(skill.frontmatter or {}),
+                "files": {f.path: {"content": f.content, "encoding": f.encoding} for f in skill.files},
             }
         )
     return resolved

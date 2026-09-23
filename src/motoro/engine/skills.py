@@ -31,10 +31,21 @@ reason — a real MCP tool with either name would otherwise be silently shadowed
 
 from __future__ import annotations
 
+import asyncio
+import base64
+import json
+import os
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
 from typing import Any
+
+from pydantic import BaseModel, Field
 
 LOAD_SKILL_TOOL = "load_skill"
 READ_SKILL_FILE_TOOL = "read_skill_file"
+RUN_SKILL_SCRIPT_TOOL = "run_skill_script"
 
 _INDEX_HEADER = """\
 ## Available skills
@@ -55,11 +66,17 @@ otherwise.
 """
 
 
+class SkillSelection(BaseModel):
+    """Skill names chosen from tier-1 metadata for a no-tool-loop run."""
+
+    names: list[str] = Field(default_factory=list)
+
+
 def _skill_names(skills: list[dict[str, Any]]) -> list[str]:
     return [str(s.get("name") or "") for s in skills if s.get("name")]
 
 
-def _files_of(skill: dict[str, Any]) -> dict[str, str]:
+def _files_of(skill: dict[str, Any]) -> dict[str, dict[str, str]]:
     """One skill's bundled level-3 files as ``{path: contents}``.
 
     Tolerant of a missing or malformed ``files`` entry: ``RunContext.skills`` is
@@ -69,7 +86,25 @@ def _files_of(skill: dict[str, Any]) -> dict[str, str]:
     files = skill.get("files")
     if not isinstance(files, dict):
         return {}
-    return {str(path): str(content) for path, content in files.items()}
+    normalized: dict[str, dict[str, str]] = {}
+    for path, value in files.items():
+        clean_path = str(path).replace("\\", "/").removeprefix("./")
+        parts = clean_path.split("/")
+        if not clean_path or clean_path.startswith("/") or any(part in {"", ".", ".."} for part in parts):
+            continue
+        if isinstance(value, dict):
+            normalized[clean_path] = {
+                "content": str(value.get("content") or ""),
+                "encoding": str(value.get("encoding") or "utf-8"),
+            }
+        else:
+            normalized[clean_path] = {"content": str(value), "encoding": "utf-8"}
+    return normalized
+
+
+def skill_script_paths(skills: list[dict[str, Any]]) -> list[str]:
+    """Python resources that the runtime can execute on demand."""
+    return [path for path in skill_file_paths(skills) if path.lower().endswith(".py")]
 
 
 def skill_file_paths(skills: list[dict[str, Any]]) -> list[str]:
@@ -129,6 +164,9 @@ def render_skill_body(skills: list[dict[str, Any]], name: str, *, file_tool_name
             rendered = (
                 f"# Skill: {title}\n\n{body}" if body else f"Skill '{title}' has no instructions beyond its summary."
             )
+            compatibility = (skill.get("frontmatter") or {}).get("compatibility")
+            if compatibility:
+                rendered = f"{rendered}\n\nCompatibility: {compatibility}"
             paths = list(_files_of(skill))
             if paths and file_tool_name:
                 listing = "\n".join(f"- {title}/{path}" for path in paths)
@@ -157,11 +195,15 @@ def render_skill_file(skills: list[dict[str, Any]], path: str) -> str:
         title = str(skill.get("name") or "").strip()
         if not title:
             continue
-        for candidate, content in _files_of(skill).items():
+        for candidate, resource in _files_of(skill).items():
             if f"{title}/{candidate}".lower() == wanted:
-                text = content.strip()
+                text = resource["content"].strip()
                 if not text:
                     return f"'{title}/{candidate}' is empty."
+                if resource["encoding"] == "base64":
+                    return (
+                        f"# {title}/{candidate}\n\nBinary resource encoded as base64 ({len(text)} characters):\n{text}"
+                    )
                 return f"# {title}/{candidate}\n\n{text}"
     available = ", ".join(skill_file_paths(skills)) or "(none)"
     return f"No bundled file at '{path}'. Available files: {available}."
@@ -205,6 +247,45 @@ def inline_skills(system_prompt: str, skills: list[dict[str, Any]]) -> str:
     return f"{system_prompt}\n\n{block}" if system_prompt else block
 
 
+async def select_relevant_skills(
+    llm_service: Any,
+    model_config: Any,
+    user_input: str,
+    skills: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], Any | None]:
+    """Choose bodies to inline using only tier-1 metadata.
+
+    Patterns without a tool loop cannot expose ``load_skill``. A small
+    structured call preserves the important part of progressive disclosure:
+    the model sees every name/description initially and only relevant bodies
+    enter the main run. Failure is conservative and keeps every skill active.
+    """
+    if not skills or llm_service is None:
+        return skills, None
+    catalog = render_skill_index(skills, tool_name="select by exact name")
+    try:
+        selection, record = await llm_service.complete(
+            config=model_config,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "Select only the skills whose descriptions apply to the user's task. "
+                        "Return exact names and an empty list when none applies. Do not infer "
+                        "anything beyond the supplied metadata.\n\n" + catalog
+                    ),
+                },
+                {"role": "user", "content": user_input},
+            ],
+            response_model=SkillSelection,
+        )
+    except Exception:
+        return skills, None
+    wanted = {name.casefold() for name in selection.names}
+    selected = [skill for skill in skills if str(skill.get("name") or "").casefold() in wanted]
+    return selected, record
+
+
 def _unclaimed_name(preferred: str, bound_names: set[str]) -> str:
     name = preferred
     suffix = 0
@@ -231,6 +312,59 @@ def resolve_read_skill_file_name(bound_names: set[str]) -> str:
     just as capable of colliding with each other as with a real one.
     """
     return _unclaimed_name(READ_SKILL_FILE_TOOL, bound_names)
+
+
+def resolve_run_skill_script_name(bound_names: set[str]) -> str:
+    return _unclaimed_name(RUN_SKILL_SCRIPT_TOOL, bound_names)
+
+
+async def run_skill_script(skills: list[dict[str, Any]], path: str, args: list[str] | None = None) -> str:
+    """Execute one bundled Python script in a temporary materialized skill directory.
+
+    This is process isolation, not a security sandbox. Products should expose
+    uploaded skills only within their existing trust model.
+    """
+    wanted = (path or "").strip().lower().removeprefix("./")
+    for skill in skills:
+        title = str(skill.get("name") or "").strip()
+        files = _files_of(skill)
+        for candidate, resource in files.items():
+            if f"{title}/{candidate}".lower() != wanted:
+                continue
+            if not candidate.lower().endswith(".py"):
+                return f"'{path}' is not an executable Python resource."
+            if resource["encoding"] != "utf-8":
+                return f"'{path}' is binary and cannot be executed."
+            with tempfile.TemporaryDirectory(prefix="motoro-skill-") as raw_root:
+                root = Path(raw_root)
+                for resource_path, item in files.items():
+                    target = root / resource_path
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    if item["encoding"] == "base64":
+                        target.write_bytes(base64.b64decode(item["content"]))
+                    else:
+                        target.write_text(item["content"], encoding="utf-8")
+                try:
+                    completed = await asyncio.to_thread(
+                        subprocess.run,
+                        [sys.executable, str(root / candidate), *(args or [])],
+                        cwd=root,
+                        env={key: value for key, value in os.environ.items() if key in {"PATH", "LANG", "LC_ALL"}},
+                        capture_output=True,
+                        text=True,
+                        timeout=300,
+                        check=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    return json.dumps({"exit_code": None, "stdout": "", "stderr": "Script timed out after 300s."})
+                return json.dumps(
+                    {
+                        "exit_code": completed.returncode,
+                        "stdout": completed.stdout[-8000:],
+                        "stderr": completed.stderr[-4000:],
+                    }
+                )
+    return f"No bundled script at '{path}'. Available scripts: {', '.join(skill_script_paths(skills)) or '(none)'}"
 
 
 def build_load_skill_tool(skills: list[dict[str, Any]], name: str = LOAD_SKILL_TOOL) -> dict[str, Any]:
@@ -289,6 +423,26 @@ def build_read_skill_file_tool(skills: list[dict[str, Any]], name: str = READ_SK
                         "enum": skill_file_paths(skills),
                         "description": "The skill-qualified path of the file to read.",
                     }
+                },
+                "required": ["path"],
+            },
+        },
+    }
+
+
+def build_run_skill_script_tool(skills: list[dict[str, Any]], name: str = RUN_SKILL_SCRIPT_TOOL) -> dict[str, Any]:
+    return {
+        "type": "function",
+        "function": {
+            "name": name,
+            "description": (
+                "Run a Python script bundled with an activated skill and return its stdout, stderr, and exit code."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "enum": skill_script_paths(skills)},
+                    "args": {"type": "array", "items": {"type": "string"}, "default": []},
                 },
                 "required": ["path"],
             },

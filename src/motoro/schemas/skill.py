@@ -26,6 +26,7 @@ class SkillCreate(BaseModel):
     name: str = Field(..., min_length=1)
     description: str = Field(..., min_length=1)
     body: str = Field(default="")
+    frontmatter: dict[str, object] = Field(default_factory=dict)
 
 
 class SkillUpdate(BaseModel):
@@ -34,6 +35,7 @@ class SkillUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     description: str | None = Field(default=None, min_length=1)
     body: str | None = None
+    frontmatter: dict[str, object] | None = None
 
 
 class SkillResponse(BaseModel):
@@ -43,6 +45,7 @@ class SkillResponse(BaseModel):
     name: str
     description: str
     body: str
+    frontmatter: dict[str, object] = Field(default_factory=dict)
     is_system: bool = False
     source_filename: str | None = None
     # Bundled level-3 paths only, never their contents: a list endpoint would

@@ -36,12 +36,16 @@ from motoro.engine.patterns.registry import PluginRegistry
 from motoro.engine.skills import (
     build_load_skill_tool,
     build_read_skill_file_tool,
+    build_run_skill_script_tool,
     render_skill_body,
     render_skill_file,
     render_skill_index,
     resolve_load_skill_name,
     resolve_read_skill_file_name,
+    resolve_run_skill_script_name,
+    run_skill_script,
     skill_file_paths,
+    skill_script_paths,
 )
 from motoro.models.pattern import PatternCategory, PatternPhase
 from motoro.models.run import RunStep, StepPhase
@@ -348,6 +352,13 @@ class ReasonActPlugin(PatternPlugin):
         )
         if file_reader:
             tools.append(build_read_skill_file_tool(skills, file_reader))
+        script_runner = (
+            resolve_run_skill_script_name(bound_names | {terminator, skill_loader, file_reader})
+            if skill_loader and skill_script_paths(skills)
+            else ""
+        )
+        if script_runner:
+            tools.append(build_run_skill_script_tool(skills, script_runner))
 
         # ``include_scratchpad: false`` means no memory of earlier turns, so the
         # window collapses to the stable system/user prefix.
@@ -418,7 +429,8 @@ class ReasonActPlugin(PatternPlugin):
         # ``issued``, the same way the terminator above is.
         skill_calls = [c for c in issued if skill_loader and c.tool_name == skill_loader]
         file_calls = [c for c in issued if file_reader and c.tool_name == file_reader]
-        dispatch = [c for c in issued if c not in skill_calls and c not in file_calls]
+        script_calls = [c for c in issued if script_runner and c.tool_name == script_runner]
+        dispatch = [c for c in issued if c not in skill_calls and c not in file_calls and c not in script_calls]
 
         turn = ReasonActStep(
             thought=completion.text,
@@ -454,6 +466,21 @@ class ReasonActPlugin(PatternPlugin):
                 wanted = str(call.tool_args.get("path") or "")
                 messages.append({"role": "tool", "tool_call_id": call.id, "content": render_skill_file(skills, wanted)})
                 log.info("reason_act.skill_file_read", path=wanted, step=step_count, component="reason_act")
+            context.metadata[_KEY_MESSAGES] = messages
+
+        if script_calls:
+            for call in script_calls:
+                wanted = str(call.tool_args.get("path") or "")
+                raw_args = call.tool_args.get("args")
+                args = [str(value) for value in raw_args] if isinstance(raw_args, list) else []
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": await run_skill_script(skills, wanted, args),
+                    }
+                )
+                log.info("reason_act.skill_script_run", path=wanted, step=step_count, component="reason_act")
             context.metadata[_KEY_MESSAGES] = messages
 
         if not dispatch:
