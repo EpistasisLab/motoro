@@ -39,7 +39,7 @@ import uuid
 from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, String, Text, func, text
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from motoro.models.base import Base, generate_uuid
@@ -75,6 +75,11 @@ class Skill(Base):
     description: Mapped[str] = mapped_column(Text, nullable=False)
     # The markdown body below the frontmatter — the instructions themselves.
     body: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # Optional Agent Skills frontmatter (`license`, `compatibility`,
+    # `metadata`, `allowed-tools`). Required discovery fields remain real
+    # columns; this preserves the portable document without creating a column
+    # for every future optional key.
+    frontmatter: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False, default=dict, server_default="{}")
     # Opaque attribution tag — see the module docstring and Agent.owner_id.
     owner_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True, index=True)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", default=False)
@@ -116,9 +121,7 @@ class SkillFile(Base):
     # reason: the model addresses these by typing the path into a tool call, and
     # a bundle holding both ``FORMS.md`` and ``forms.md`` makes the answer to
     # "which one did it mean" depend on row order.
-    __table_args__ = (
-        Index("uq_skill_files_skill_path", "skill_id", text("lower(path)"), unique=True),
-    )
+    __table_args__ = (Index("uq_skill_files_skill_path", "skill_id", text("lower(path)"), unique=True),)
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=generate_uuid)
     # Hard FK with ON DELETE CASCADE, unlike owner_id above: skills is core's
@@ -131,6 +134,9 @@ class SkillFile(Base):
     # Never absolute, never containing "..": see validate_bundle_path.
     path: Mapped[str] = mapped_column(String(255), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    # `utf-8` stores content directly; `base64` preserves binary assets without
+    # pretending they are prompt text. The read tool identifies the encoding.
+    encoding: Mapped[str] = mapped_column(String(16), nullable=False, default="utf-8", server_default="utf-8")
     # Upload order, preserved so the "bundled files" listing an agent sees is
     # stable between runs rather than whatever the database hands back.
     position: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

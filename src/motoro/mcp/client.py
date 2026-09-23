@@ -129,6 +129,27 @@ class ToolInfo:
     name: str
     description: str
     input_schema: dict[str, Any] = field(default_factory=dict)
+    title: str = ""
+    output_schema: dict[str, Any] = field(default_factory=dict)
+    annotations: dict[str, Any] = field(default_factory=dict)
+
+
+def _tool_info(tool: Any) -> ToolInfo:
+    output_schema = getattr(tool, "outputSchema", None)
+    annotations = getattr(tool, "annotations", None)
+    annotation_data: dict[str, Any] = {}
+    if annotations is not None and hasattr(annotations, "model_dump"):
+        annotation_data = annotations.model_dump(exclude_none=True)
+    elif isinstance(annotations, dict):
+        annotation_data = annotations
+    return ToolInfo(
+        name=str(tool.name),
+        description=str(tool.description or ""),
+        input_schema=tool.inputSchema if isinstance(tool.inputSchema, dict) else {},
+        title=str(getattr(tool, "title", None) or ""),
+        output_schema=output_schema if isinstance(output_schema, dict) else {},
+        annotations=annotation_data,
+    )
 
 
 @dataclass
@@ -326,14 +347,7 @@ class MCPClient:
         self._instructions = (getattr(init, "instructions", None) or "").strip()
 
         result = await self._session.list_tools()
-        self._tools = [
-            ToolInfo(
-                name=t.name,
-                description=t.description or "",
-                input_schema=t.inputSchema if isinstance(t.inputSchema, dict) else {},
-            )
-            for t in result.tools
-        ]
+        self._tools = [_tool_info(tool) for tool in result.tools]
         self._connected = True
         self._log.info("mcp.server.connected", tools=len(self._tools))
         await self._fire_tools_changed()
@@ -526,14 +540,7 @@ class MCPClient:
             raise RuntimeError(f"MCPClient '{self.name}' is not connected")
 
         result = await self._session.list_tools()
-        self._tools = [
-            ToolInfo(
-                name=t.name,
-                description=t.description or "",
-                input_schema=t.inputSchema if isinstance(t.inputSchema, dict) else {},
-            )
-            for t in result.tools
-        ]
+        self._tools = [_tool_info(tool) for tool in result.tools]
         self._log.info("mcp.server.tools_refreshed", tools=len(self._tools))
         await self._fire_tools_changed()
         return list(self._tools)

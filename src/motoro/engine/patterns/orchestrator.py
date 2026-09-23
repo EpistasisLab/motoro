@@ -20,7 +20,7 @@ from motoro.engine.patterns import catalog, composition
 from motoro.engine.patterns.base import HookAction, HookCallable, HookPoint, PatternPlugin
 from motoro.engine.patterns.registry import PluginRegistry
 from motoro.engine.runtime import AgentRunResult, AgentRuntime
-from motoro.engine.skills import inline_skills
+from motoro.engine.skills import inline_skills, select_relevant_skills
 from motoro.models.pattern import PatternCategory
 from motoro.models.run import RunStatus, StepPhase
 from motoro.observability.metrics import record_hook_duration
@@ -316,6 +316,15 @@ class PatternOrchestrator:
         # duplicate every skill body.
         _skills_handled = context.metadata.get(_KEY_SKILLS_INLINED) or any(p.consumes_skills for p in self._plugins)
         if context.skills and not _skills_handled:
+            context.skills, selection_record = await select_relevant_skills(
+                rt._llm_service, context.model_config, context.user_input, context.skills
+            )
+            if selection_record:
+                await context.add_llm_usage(
+                    selection_record.prompt_tokens,
+                    selection_record.completion_tokens,
+                    selection_record.cost_estimate,
+                )
             context.system_prompt = inline_skills(context.system_prompt, context.skills)
             context.metadata[_KEY_SKILLS_INLINED] = True
             logger.info(

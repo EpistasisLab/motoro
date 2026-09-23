@@ -112,6 +112,28 @@ def test_parses_frontmatter_and_body() -> None:
     assert "---" not in parsed.body
 
 
+def test_preserves_optional_frontmatter() -> None:
+    from motoro.services.skill_service import parse_skill_markdown, render_skill_md
+
+    parsed = parse_skill_markdown(
+        _VALID.replace(
+            "description:",
+            "license: Apache-2.0\n"
+            "compatibility: Requires Python 3.12+\n"
+            "metadata:\n  author: lab\n"
+            "allowed-tools: Read\n"
+            "description:",
+        )
+    )
+    assert parsed.frontmatter == {
+        "license": "Apache-2.0",
+        "compatibility": "Requires Python 3.12+",
+        "metadata": {"author": "lab"},
+        "allowed-tools": "Read",
+    }
+    assert parse_skill_markdown(render_skill_md(parsed)).frontmatter == parsed.frontmatter
+
+
 def test_rejects_a_file_with_no_frontmatter() -> None:
     from motoro.services.skill_service import SkillFormatError, parse_skill_markdown
 
@@ -187,6 +209,7 @@ def test_render_quotes_a_description_that_would_break_yaml() -> None:
         name="tricky-skill",
         description="Use when: the input has a colon, a 'quote', and a #hash.",
         body="Step one.",
+        frontmatter={},
     )
     assert parse_skill_markdown(render_skill_md(tricky)).description == tricky.description
 
@@ -204,7 +227,7 @@ def test_parses_a_directory_into_skill_md_and_its_bundled_files() -> None:
     )
     assert bundle.skill.name == "spinal-mri-qc"
     # Upload order preserved — it is the order the agent is shown the files in.
-    assert [p for p, _ in bundle.files] == ["FORMS.md", "references/schema.md"]
+    assert [p for p, _content, _encoding in bundle.files] == ["FORMS.md", "references/schema.md"]
 
 
 def test_a_bundle_is_matched_case_insensitively_on_skill_md() -> None:
@@ -220,13 +243,11 @@ def test_a_folder_with_no_skill_md_is_rejected() -> None:
         parse_skill_bundle([("FORMS.md", "form text")])
 
 
-def test_a_bundled_script_is_rejected_with_the_reason() -> None:
-    from motoro.services.skill_service import SkillFormatError, parse_skill_bundle
+def test_a_bundled_script_is_preserved_as_an_executable_resource() -> None:
+    from motoro.services.skill_service import parse_skill_bundle
 
-    # Not an oversight: there is no shell behind an MCP tool call, so accepting
-    # the file would mean storing something no run can ever reach.
-    with pytest.raises(SkillFormatError, match="MCP server"):
-        parse_skill_bundle([("SKILL.md", _VALID), ("scripts/fill_form.py", "print(1)")])
+    bundle = parse_skill_bundle([("SKILL.md", _VALID), ("scripts/fill_form.py", "print(1)")])
+    assert bundle.files == (("scripts/fill_form.py", "print(1)", "utf-8"),)
 
 
 @pytest.mark.parametrize(
@@ -255,11 +276,12 @@ def test_normalises_a_leading_dot_slash_and_backslashes() -> None:
     assert validate_bundle_path("references\\schema.md") == "references/schema.md"
 
 
-def test_rejects_a_non_text_asset() -> None:
-    from motoro.services.skill_service import SkillFormatError, validate_bundle_path
+def test_preserves_a_binary_asset_as_base64() -> None:
+    from motoro.services.skill_service import parse_skill_bundle
 
-    with pytest.raises(SkillFormatError, match="context window"):
-        validate_bundle_path("diagram.png")
+    bundle = parse_skill_bundle([("SKILL.md", _VALID), ("assets/diagram.png", b"\x89PNG\x00")])
+    assert bundle.files[0][0] == "assets/diagram.png"
+    assert bundle.files[0][2] == "base64"
 
 
 def test_rejects_the_same_path_twice_case_insensitively() -> None:
@@ -346,6 +368,28 @@ def test_inline_fallback_includes_every_body() -> None:
     assert "SECRET-BETA-BODY" in prompt
 
 
+async def test_no_tool_loop_selects_from_metadata_before_inlining() -> None:
+    from motoro.engine.skills import select_relevant_skills
+    from motoro.schemas.agent import ModelConfig
+
+    class SelectingLLM:
+        messages: list[dict[str, str]]
+
+        async def complete(self, **kwargs: Any) -> tuple[Any, None]:
+            self.messages = kwargs["messages"]
+            return kwargs["response_model"](names=["beta"]), None
+
+    llm = SelectingLLM()
+    selected, record = await select_relevant_skills(llm, ModelConfig(), "do beta work", _SKILLS)
+
+    assert [skill["name"] for skill in selected] == ["beta"]
+    assert record is None
+    selection_prompt = "\n".join(message["content"] for message in llm.messages)
+    assert "alpha" in selection_prompt and "beta" in selection_prompt
+    assert "SECRET-ALPHA-BODY" not in selection_prompt
+    assert "SECRET-BETA-BODY" not in selection_prompt
+
+
 def test_the_index_never_carries_level_three_either() -> None:
     from motoro.engine.skills import render_skill_index
 
@@ -394,6 +438,28 @@ def test_render_skill_file_answers_an_invented_path_instead_of_raising() -> None
     result = render_skill_file(_BUNDLED_SKILLS, "alpha/NOPE.md")
     assert "No bundled file at 'alpha/NOPE.md'" in result
     assert "alpha/FORMS.md" in result
+
+
+async def test_run_skill_script_materializes_sibling_resources() -> None:
+    from motoro.engine.skills import run_skill_script
+
+    skills = [
+        {
+            "name": "alpha",
+            "description": "Runs alpha.",
+            "body": "Run scripts/main.py",
+            "files": {
+                "scripts/main.py": {
+                    "content": "from pathlib import Path\nprint(Path('data.txt').read_text())",
+                    "encoding": "utf-8",
+                },
+                "data.txt": {"content": "hello", "encoding": "utf-8"},
+            },
+        }
+    ]
+    result = await run_skill_script(skills, "alpha/scripts/main.py")
+    assert '"exit_code": 0' in result
+    assert "hello" in result
 
 
 def test_inline_fallback_names_bundled_files_and_says_they_are_unavailable() -> None:
@@ -613,9 +679,7 @@ async def test_create_list_and_resolve_preserves_declared_order() -> None:
 
     owner = uuid.uuid4()
     first = await create_skill_from_markdown(_VALID, owner_id=owner, source_filename="spinal.md")
-    second = await create_skill_from_markdown(
-        _VALID.replace("spinal-mri-qc", "cord-segmentation"), owner_id=owner
-    )
+    second = await create_skill_from_markdown(_VALID.replace("spinal-mri-qc", "cord-segmentation"), owner_id=owner)
 
     assert {s.id for s in await list_skills(owner_id=owner)} == {first.id, second.id}
     assert await list_skills(owner_id=uuid.uuid4()) == []
@@ -637,10 +701,13 @@ async def test_a_bundle_round_trips_into_resolve_skills() -> None:
     )
     assert bundle_paths(skill) == ["FORMS.md", "references/schema.md"]
 
-    # Contents come back eagerly: engine.skills is pure functions with no
-    # session to lazy-load through mid-turn.
+    # Contents and their storage encoding come back eagerly: engine.skills is
+    # pure functions with no session to lazy-load through mid-turn.
     resolved = await resolve_skills({"skill_ids": [skill.id]}, owner_id=owner)
-    assert resolved[0]["files"] == {"FORMS.md": "form text", "references/schema.md": "schema text"}
+    assert resolved[0]["files"] == {
+        "FORMS.md": {"content": "form text", "encoding": "utf-8"},
+        "references/schema.md": {"content": "schema text", "encoding": "utf-8"},
+    }
 
 
 @needs_db
