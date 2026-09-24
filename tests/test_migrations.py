@@ -159,6 +159,56 @@ async def test_upgrade_is_idempotent(scratch_dbs: tuple[str, str]) -> None:
     assert await current_revision(url) == first
 
 
+async def test_mcp_names_upgrade_to_owner_scoped_uniqueness_and_downgrade_refuses_duplicates(
+    scratch_dbs: tuple[str, str],
+) -> None:
+    """The MCP migration permits cross-owner reuse without weakening either namespace."""
+    import uuid
+
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError, IntegrityError
+    from sqlalchemy.ext.asyncio import create_async_engine
+
+    from motoro.migrations import current_revision, downgrade, upgrade, upgrade_async
+
+    _, db = scratch_dbs
+    url = _url_for(db)
+    await asyncio.to_thread(upgrade, url, "d4b8e2a71c90")
+    await upgrade_async(url)
+
+    engine = create_async_engine(url)
+    insert = text(
+        """
+        INSERT INTO mcp_server_configs
+            (id, name, transport, status, is_system, owner_id)
+        VALUES
+            (:id, :name, 'stdio', 'disconnected', false, :owner_id)
+        """
+    )
+    owner_a = uuid.uuid4()
+    owner_b = uuid.uuid4()
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(insert, {"id": uuid.uuid4(), "name": "shared", "owner_id": owner_a})
+            await conn.execute(insert, {"id": uuid.uuid4(), "name": "shared", "owner_id": owner_b})
+
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(insert, {"id": uuid.uuid4(), "name": "shared", "owner_id": owner_a})
+
+        async with engine.begin() as conn:
+            await conn.execute(insert, {"id": uuid.uuid4(), "name": "global", "owner_id": None})
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as conn:
+                await conn.execute(insert, {"id": uuid.uuid4(), "name": "global", "owner_id": None})
+    finally:
+        await engine.dispose()
+
+    with pytest.raises(DBAPIError, match="duplicate names exist across owners"):
+        await asyncio.to_thread(downgrade, url, "d4b8e2a71c90")
+    assert await current_revision(url) == "8f2c1a6d9b40"
+
+
 async def test_chain_owns_only_core_tables() -> None:
     """The autogenerate filter is confined to core's own tables.
 

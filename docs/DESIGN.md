@@ -306,6 +306,44 @@ config = await register_server(name="search", transport="stdio", command="npx -y
 await hydrate_registry()
 ```
 
+### MCP owner namespaces and the ASAREE upgrade contract
+
+An MCP registration's persisted `MCPServerConfig.id` is its runtime identity.
+Display names are unique per non-null `owner_id`; ownerless names have their
+own unique namespace because PostgreSQL does not treat `NULL` values as equal
+in an ordinary composite unique constraint. System registrations are ownerless,
+visible to every owner, and reserve their display name globally: an owned
+registration cannot shadow a visible system server, and a system registration
+cannot be added on top of any existing owned use of its name.
+
+`MCPServerRegistry` is therefore keyed by registration UUID, not display name.
+Its mutation methods (`register`, `ensure_registered`, `get`, `unregister`, and
+`refresh_server`) take that UUID. `register`/`ensure_registered` additionally
+receive the display `name`, `owner_id`, and `is_system` metadata used for scoped
+discovery. `get_all_tools(owner_id=...)` returns only that owner's registrations
+plus system registrations and includes a string `server_id` on every descriptor.
+An exact `server_ids={...}` scope is also available for a run allow-list.
+`lookup_tool` requires one of those scopes and applies it before matching either
+`server.tool` or a bare tool name.
+
+ASAREE upgrading from Motoro 0.7.0 must make these caller changes:
+
+- Gather tools with `registry.get_all_tools(owner_id=acting_owner_id)` (or pass
+  explicit registration IDs), then pass those unchanged descriptors to
+  `execute_run(available_tools=...)`; `server_id` is now required for execution.
+- Pass the persisted UUID to every registry mutation/lookup. Do not translate
+  it back to a display name.
+- Call `get_server_by_name(name, owner_id=acting_owner_id)` for owner-scoped
+  name lookup. System fallback is included automatically.
+- Treat `MCPServerNameConflictError` as the clean conflict response for a
+  same-owner duplicate or a collision with a visible system name.
+- Run Motoro's migration before accepting cross-owner duplicates. Downgrade
+  explicitly aborts while any duplicate display names exist across owners;
+  operators must rename/remove those rows before restoring global uniqueness.
+
+The model still sees the same namespaced names (`server.tool`). The UUID is
+internal routing metadata and is never substituted into prompts or tool names.
+
 **The database is authoritative here — the opposite direction from
 `engine.patterns.catalog`.** There, plugin code was the source of truth and
 the table was a read-only projection for products to query. Here, the

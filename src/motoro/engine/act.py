@@ -461,7 +461,7 @@ class ActPhase:
         # rather than asking a second model to choose again. Re-deciding here is
         # what let an execution pattern's chosen tool diverge from the tool that
         # actually ran, and made the pattern's own trajectory record fictional.
-        if step.tool_name and mcp is not None and mcp.can_handle(step):
+        if step.tool_name and mcp is not None and mcp.can_handle(step, context):
             log.debug("act.step.using_planned_tool", tool=step.tool_name, component="act")
             result_text, _unused, tool_record = await mcp.execute_step(step, context)
             return _StepOutcome(
@@ -536,7 +536,7 @@ class ActPhase:
                 tool_args=dict(call.arguments),
             )
 
-            if mcp is None or not mcp.can_handle(tool_step):
+            if mcp is None or not mcp.can_handle(tool_step, context):
                 log.warning("act.step.mcp_cannot_handle", tool=tool_name, component="act")
                 if single:
                     # Preserve the historical single-tool path: fall through to
@@ -662,7 +662,7 @@ class ActPhase:
                 tool_name=tool_name,
                 tool_args=tool_args or {},
             )
-            if mcp.can_handle(tool_step):
+            if mcp.can_handle(tool_step, context):
                 result_text, _unused, tool_record = await mcp.execute_step(tool_step, context)
                 return _StepOutcome(
                     text="",

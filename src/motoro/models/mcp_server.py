@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, String, Text, func
+from sqlalchemy import Boolean, DateTime, Enum, Index, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -46,9 +46,24 @@ class MCPServerConfig(Base):
     """Persisted configuration for an MCP server connection."""
 
     __tablename__ = "mcp_server_configs"
+    __table_args__ = (
+        Index(
+            "uq_mcp_server_configs_owner_name",
+            "owner_id",
+            "name",
+            unique=True,
+            postgresql_where=text("owner_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_mcp_server_configs_ownerless_name",
+            "name",
+            unique=True,
+            postgresql_where=text("owner_id IS NULL"),
+        ),
+    )
 
     id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=generate_uuid)
-    name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
     transport: Mapped[MCPTransport] = mapped_column(
         Enum(
             MCPTransport,

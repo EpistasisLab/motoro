@@ -9,10 +9,15 @@ is test fixture, not a thing a product imports.
 
 from __future__ import annotations
 
+import argparse
 import json
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
+
+_parser = argparse.ArgumentParser()
+_parser.add_argument("--prefix", default="echo")
+_args, _unknown = _parser.parse_known_args()
 
 # The server's own description of itself, sent once during the initialize
 # handshake -- distinct from the per-tool descriptions below. Set here so the
@@ -27,7 +32,7 @@ mcp = FastMCP("echo-test-server", instructions=INSTRUCTIONS)
 @mcp.tool()
 def echo(text: str) -> str:
     """Return *text* unchanged, prefixed so a caller can tell this tool ran."""
-    return f"echo: {text}"
+    return f"{_args.prefix}: {text}"
 
 
 @mcp.tool()

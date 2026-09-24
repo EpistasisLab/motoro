@@ -135,6 +135,21 @@ def test_mcp_server_config_owner_id_is_opaque() -> None:
     assert not owner_col.foreign_keys
 
 
+def test_mcp_server_names_are_unique_per_owner_and_for_ownerless_rows() -> None:
+    from motoro.models.mcp_server import MCPServerConfig
+
+    indexes = {index.name: index for index in MCPServerConfig.__table__.indexes}
+    owned = indexes["uq_mcp_server_configs_owner_name"]
+    ownerless = indexes["uq_mcp_server_configs_ownerless_name"]
+
+    assert owned.unique is True
+    assert [column.name for column in owned.columns] == ["owner_id", "name"]
+    assert str(owned.dialect_options["postgresql"]["where"]) == "owner_id IS NOT NULL"
+    assert ownerless.unique is True
+    assert [column.name for column in ownerless.columns] == ["name"]
+    assert str(ownerless.dialect_options["postgresql"]["where"]) == "owner_id IS NULL"
+
+
 # --------------------------------------------------------------------------- #
 #  Security modules — self-contained, no ares/motoro coupling            #
 # --------------------------------------------------------------------------- #
@@ -272,6 +287,161 @@ async def test_register_server_connects_and_persists() -> None:
         await registry.disconnect_all()
 
 
+@needs_db
+async def test_same_name_servers_are_isolated_by_registration_id_and_owner() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import get_server_by_name, register_server
+
+    registry = MCPServerRegistry()
+    owner_a = uuid.uuid4()
+    owner_b = uuid.uuid4()
+    name = f"shared-{uuid.uuid4().hex[:8]}"
+    first = await _with_timeout(
+        register_server(name=name, transport="stdio", command=_ECHO_COMMAND, owner_id=owner_a, registry=registry)
+    )
+    second = await _with_timeout(
+        register_server(name=name, transport="stdio", command=_ECHO_COMMAND, owner_id=owner_b, registry=registry)
+    )
+    try:
+        assert first.id != second.id
+        assert set(registry.servers) == {first.id, second.id}
+        assert (await get_server_by_name(name, owner_id=owner_a)).id == first.id
+        assert (await get_server_by_name(name, owner_id=owner_b)).id == second.id
+
+        first_tools = registry.get_all_tools(owner_id=owner_a)
+        second_tools = registry.get_all_tools(owner_id=owner_b)
+        assert {tool["server_id"] for tool in first_tools} == {str(first.id)}
+        assert {tool["server_id"] for tool in second_tools} == {str(second.id)}
+
+        first_match = registry.lookup_tool("echo", server_ids={first.id})
+        second_match = registry.lookup_tool("echo", server_ids={second.id})
+        assert first_match is not None and first_match[0] == first.id
+        assert second_match is not None and second_match[0] == second.id
+    finally:
+        await registry.disconnect_all()
+
+
+async def test_same_name_tool_execution_routes_through_the_run_registration_ids() -> None:
+    from motoro.engine.context import RunContext
+    from motoro.mcp.adapters import MCPToolExecutor
+    from motoro.mcp.registry import MCPServerRegistry, TransportType
+    from motoro.schemas.agent import ModelConfig
+    from motoro.schemas.llm import PlanStep
+
+    registry = MCPServerRegistry()
+    owner_a = uuid.uuid4()
+    owner_b = uuid.uuid4()
+    name = f"shared-{uuid.uuid4().hex[:8]}"
+    first_id = uuid.uuid4()
+    second_id = uuid.uuid4()
+    await _with_timeout(
+        registry.register(
+            server_id=first_id,
+            name=name,
+            transport=TransportType.STDIO,
+            command=f"{_ECHO_COMMAND} --prefix owner-a",
+            owner_id=owner_a,
+        )
+    )
+    await _with_timeout(
+        registry.register(
+            server_id=second_id,
+            name=name,
+            transport=TransportType.STDIO,
+            command=f"{_ECHO_COMMAND} --prefix owner-b",
+            owner_id=owner_b,
+        )
+    )
+    executor = MCPToolExecutor(registry)
+
+    def context(owner_id: uuid.UUID) -> RunContext:
+        return RunContext(
+            agent_goal="g",
+            system_prompt="s",
+            model_config=ModelConfig(),
+            user_input="u",
+            owner_id=owner_id,
+            available_tools=registry.get_all_tools(owner_id=owner_id),
+        )
+
+    try:
+        bare = PlanStep(action="echo", description="echo", tool_name="echo", tool_args={"text": "hi"})
+        namespaced = PlanStep(
+            action="echo", description="echo", tool_name=f"{name}.echo", tool_args={"text": "hi"}
+        )
+        first_result, _, _ = await _with_timeout(executor.execute_step(bare, context(owner_a)))
+        second_result, _, _ = await _with_timeout(executor.execute_step(namespaced, context(owner_b)))
+        assert first_result == "owner-a: hi"
+        assert second_result == "owner-b: hi"
+
+        # Supplying only owner A's descriptor can never resolve owner B first,
+        # even though both registrations expose the same namespaced and bare names.
+        first_tools = registry.get_all_tools(server_ids={first_id})
+        assert {tool["server_id"] for tool in first_tools} == {str(first_id)}
+        assert str(second_id) not in {tool["server_id"] for tool in first_tools}
+    finally:
+        await registry.disconnect_all()
+
+
+@needs_db
+async def test_same_owner_duplicate_and_system_shadow_are_rejected_cleanly() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import MCPServerNameConflictError, register_server
+
+    registry = MCPServerRegistry()
+    owner = uuid.uuid4()
+    name = f"reserved-{uuid.uuid4().hex[:8]}"
+    await _with_timeout(
+        register_server(name=name, transport="stdio", command=_ECHO_COMMAND, owner_id=owner, registry=registry)
+    )
+    try:
+        with pytest.raises(MCPServerNameConflictError):
+            await register_server(
+                name=name, transport="stdio", command=_ECHO_COMMAND, owner_id=owner, registry=registry
+            )
+
+        system_name = f"system-{uuid.uuid4().hex[:8]}"
+        system = await _with_timeout(
+            register_server(
+                name=system_name,
+                transport="stdio",
+                command=_ECHO_COMMAND,
+                is_system=True,
+                registry=registry,
+            )
+        )
+        assert system.is_system
+        with pytest.raises(MCPServerNameConflictError):
+            await register_server(
+                name=system_name,
+                transport="stdio",
+                command=_ECHO_COMMAND,
+                owner_id=uuid.uuid4(),
+                registry=registry,
+            )
+
+        owned_first_name = f"owned-first-{uuid.uuid4().hex[:8]}"
+        await _with_timeout(
+            register_server(
+                name=owned_first_name,
+                transport="stdio",
+                command=_ECHO_COMMAND,
+                owner_id=uuid.uuid4(),
+                registry=registry,
+            )
+        )
+        with pytest.raises(MCPServerNameConflictError):
+            await register_server(
+                name=owned_first_name,
+                transport="stdio",
+                command=_ECHO_COMMAND,
+                is_system=True,
+                registry=registry,
+            )
+    finally:
+        await registry.disconnect_all()
+
+
 def test_build_run_meta_includes_owner_id() -> None:
     from motoro.engine.context import RunContext
     from motoro.mcp.adapters import META_KEY_OWNER_ID, META_KEY_RUN_ID, META_KEY_WORKSPACE_ID, _build_run_meta
@@ -404,7 +574,8 @@ async def test_call_tool_delivers_meta_verbatim() -> None:
     name = f"echo-{uuid.uuid4().hex[:8]}"
     await _with_timeout(register_server(name=name, transport="stdio", command=_ECHO_COMMAND, registry=registry))
     try:
-        client = registry.servers[name].client
+        [entry] = registry.servers.values()
+        client = entry.client
         sent_meta = {"motoro.workspace_id": "exp1/cellA", "motoro.owner_id": str(uuid.uuid4())}
         result = await _with_timeout(client.call_tool("echo_meta", {}, meta=sent_meta))
         assert not result.is_error
@@ -512,6 +683,8 @@ async def test_register_server_is_system_and_list_servers_includes_it_for_any_ow
         # A system server shows up for ANY owner's filtered list, not just its own.
         someone_elses_view = await list_servers(owner_id=uuid.uuid4())
         assert system_config.id in {s.id for s in someone_elses_view}
+        tools = registry.get_all_tools(owner_id=uuid.uuid4())
+        assert system_config.id in {uuid.UUID(tool["server_id"]) for tool in tools}
     finally:
         await registry.disconnect_all()
 
@@ -567,13 +740,13 @@ async def test_reconnect_server_after_manual_unregister() -> None:
             name=f"echo-{uuid.uuid4().hex[:8]}", transport="stdio", command=_ECHO_COMMAND, registry=registry
         )
     )
-    await registry.unregister(config.name)
+    await registry.unregister(config.id)
     assert registry.servers == {}
 
     try:
         reconnected = await _with_timeout(reconnect_server(config.id, registry=registry))
         assert reconnected.status.value == "connected"
-        assert config.name in registry.servers
+        assert config.id in registry.servers
     finally:
         await registry.disconnect_all()
 
@@ -594,7 +767,8 @@ async def test_update_server_reconnects_with_new_settings() -> None:
         updated = await _with_timeout(update_server(config.id, name=new_name, registry=registry))
         assert updated.name == new_name
         assert updated.status.value == "connected"
-        assert new_name in registry.servers
+        assert config.id in registry.servers
+        assert registry.get(config.id).name == new_name
     finally:
         await registry.disconnect_all()
 
@@ -677,8 +851,8 @@ async def test_hydrate_registry_reconnects_from_the_table_alone() -> None:
     try:
         failed = await _with_timeout(hydrate_registry(registry=fresh_registry))
         assert failed == []
-        assert config.name in fresh_registry.servers
-        assert fresh_registry.get(config.name).client.connected
+        assert config.id in fresh_registry.servers
+        assert fresh_registry.get(config.id).client.connected
     finally:
         # anyio's cancel-scope stack is per *task*, not per registry: both
         # clients' stdio transports were entered in this same test's task, so
@@ -687,6 +861,94 @@ async def test_hydrate_registry_reconnects_from_the_table_alone() -> None:
         # hydrate_registry above), so it must be disconnected first.
         await fresh_registry.disconnect_all()
         await original_registry.disconnect_all()
+
+
+@needs_db
+async def test_concurrent_hydration_retains_both_same_name_registrations() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import hydrate_registry, register_server
+
+    source = MCPServerRegistry()
+    name = f"shared-{uuid.uuid4().hex[:8]}"
+    first = await _with_timeout(
+        register_server(
+            name=name,
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            owner_id=uuid.uuid4(),
+            registry=source,
+        )
+    )
+    second = await _with_timeout(
+        register_server(
+            name=name,
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            owner_id=uuid.uuid4(),
+            registry=source,
+        )
+    )
+    hydrated = MCPServerRegistry()
+    try:
+        outcomes = await _with_timeout(
+            asyncio.gather(*(hydrate_registry(registry=hydrated) for _ in range(4)))
+        )
+        assert outcomes == [[], [], [], []]
+        assert set(hydrated.servers) == {first.id, second.id}
+        assert all(entry.client.connected for entry in hydrated.servers.values())
+    finally:
+        await hydrated.disconnect_all()
+        await source.disconnect_all()
+
+
+@needs_db
+async def test_mutating_one_same_name_registration_leaves_the_other_live() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import (
+        delete_server,
+        reconnect_server,
+        refresh_server,
+        register_server,
+        update_server,
+    )
+
+    registry = MCPServerRegistry()
+    name = f"shared-{uuid.uuid4().hex[:8]}"
+    first = await _with_timeout(
+        register_server(
+            name=name,
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            owner_id=uuid.uuid4(),
+            registry=registry,
+        )
+    )
+    second = await _with_timeout(
+        register_server(
+            name=name,
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            owner_id=uuid.uuid4(),
+            registry=registry,
+        )
+    )
+    second_client = registry.get(second.id).client
+    try:
+        await registry.unregister(first.id)
+        reconnected = await _with_timeout(reconnect_server(first.id, registry=registry))
+        assert reconnected is not None and registry.get(first.id).client.connected
+        await _with_timeout(refresh_server(first.id, registry=registry))
+        renamed = await _with_timeout(update_server(first.id, name=f"{name}-renamed", registry=registry))
+        assert renamed is not None and renamed.name == f"{name}-renamed"
+        assert registry.get(second.id).client is second_client
+        assert second_client.connected
+
+        assert await _with_timeout(delete_server(first.id, registry=registry)) is True
+        assert registry.get(first.id) is None
+        assert registry.get(second.id).client is second_client
+        assert second_client.connected
+    finally:
+        await registry.disconnect_all()
 
 
 @needs_db
@@ -700,12 +962,12 @@ async def test_hydrate_registry_is_a_no_op_for_already_live_servers() -> None:
             name=f"echo-{uuid.uuid4().hex[:8]}", transport="stdio", command=_ECHO_COMMAND, registry=registry
         )
     )
-    entry_before = registry.get(config.name)
+    entry_before = registry.get(config.id)
     try:
         failed = await _with_timeout(hydrate_registry(registry=registry))
         assert failed == []
         # Same entry object — untouched, not reconnected.
-        assert registry.get(config.name) is entry_before
+        assert registry.get(config.id) is entry_before
     finally:
         await registry.disconnect_all()
 
@@ -785,29 +1047,32 @@ async def test_reregistering_a_name_does_not_cancel_the_task_using_it() -> None:
 
     registry = MCPServerRegistry()
     name = f"echo-{uuid.uuid4().hex[:8]}"
+    server_id = uuid.uuid4()
     victim_survived = asyncio.Event()
 
     async def victim() -> None:
         # Connects the server, then stays alive -- exactly what a protocol run
         # does between hydrating the registry and finishing its graph walk.
-        await registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+        await registry.register(server_id=server_id, name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
         await asyncio.sleep(0.5)
         victim_survived.set()
 
     try:
         task = asyncio.create_task(victim())
         # Let it get all the way connected before we pull the rug.
-        while registry.get(name) is None or not registry.get(name).client.connected:
+        while registry.get(server_id) is None or not registry.get(server_id).client.connected:
             await asyncio.sleep(0.05)
 
         # Re-register the same name from *this* task. This is what a second
         # concurrent hydrate_registry did.
-        await _with_timeout(registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND))
+        await _with_timeout(
+            registry.register(server_id=server_id, name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+        )
 
         await _with_timeout(task)
         assert not task.cancelled()
         assert victim_survived.is_set(), "re-registering cancelled the task that had connected the server"
-        assert registry.get(name).client.connected
+        assert registry.get(server_id).client.connected
     finally:
         await _with_timeout(registry.disconnect_all())
 
@@ -820,12 +1085,15 @@ async def test_concurrent_ensure_registered_connects_exactly_once() -> None:
 
     registry = MCPServerRegistry()
     name = f"echo-{uuid.uuid4().hex[:8]}"
+    server_id = uuid.uuid4()
 
     try:
         entries = await _with_timeout(
             asyncio.gather(
                 *(
-                    registry.ensure_registered(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+                    registry.ensure_registered(
+                        server_id=server_id, name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND
+                    )
                     for _ in range(6)
                 )
             )
@@ -846,18 +1114,24 @@ async def test_ensure_registered_retries_a_dead_entry() -> None:
 
     registry = MCPServerRegistry()
     name = f"echo-{uuid.uuid4().hex[:8]}"
+    server_id = uuid.uuid4()
 
     try:
         # A command that cannot spawn leaves an entry with connected=False.
         dead = await _with_timeout(
             registry.ensure_registered(
-                name=name, transport=TransportType.STDIO, command="definitely-not-a-real-binary-xyz"
+                server_id=server_id,
+                name=name,
+                transport=TransportType.STDIO,
+                command="definitely-not-a-real-binary-xyz",
             )
         )
         assert not dead.client.connected
 
         live = await _with_timeout(
-            registry.ensure_registered(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+            registry.ensure_registered(
+                server_id=server_id, name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND
+            )
         )
         assert live.client.connected
     finally:
@@ -877,9 +1151,12 @@ async def test_disconnect_all_is_concurrent_and_clean() -> None:
 
     registry = MCPServerRegistry()
     names = [f"echo-{uuid.uuid4().hex[:8]}" for _ in range(4)]
-    for name in names:
-        await _with_timeout(registry.register(name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND))
-    assert all(registry.get(n).client.connected for n in names)
+    server_ids = [uuid.uuid4() for _ in names]
+    for server_id, name in zip(server_ids, names, strict=True):
+        await _with_timeout(
+            registry.register(server_id=server_id, name=name, transport=TransportType.STDIO, command=_ECHO_COMMAND)
+        )
+    assert all(registry.get(server_id).client.connected for server_id in server_ids)
 
     with structlog.testing.capture_logs() as logs:
         await _with_timeout(registry.disconnect_all())
