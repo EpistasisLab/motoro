@@ -324,15 +324,17 @@ async def test_live_transport_delivers_ambient_meta_to_actor_string(tmp_path):
 
     registry = MCPServerRegistry()
     name = f"okf-{uuid.uuid4().hex[:8]}"
+    server_id = uuid.uuid4()
     await _with_timeout(
         registry.register(
+            server_id=server_id,
             name=name,
             command=_OKF_COMMAND,
             server_env={okf._BUNDLE_ROOT_ENV: str(tmp_path)},
         )
     )
     try:
-        client = registry.servers[name].client
+        client = registry.servers[server_id].client
         sent_meta = {okf.META_KEY_AGENT_NAME: "SF-DC", okf.META_KEY_MODEL: "claude-opus-5"}
         result = await _with_timeout(
             client.call_tool(

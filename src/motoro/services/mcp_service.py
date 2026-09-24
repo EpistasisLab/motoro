@@ -26,7 +26,8 @@ import logging
 import uuid
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import or_, select
+from sqlalchemy import or_, select, text
+from sqlalchemy.exc import IntegrityError
 
 from motoro.mcp.client import TransportType
 from motoro.mcp.registry import MCPServerRegistry, get_registry
@@ -42,6 +43,10 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
 logger = logging.getLogger(__name__)
+
+
+class MCPServerNameConflictError(ValueError):
+    """A display name is already visible in the requested owner's namespace."""
 
 
 def _session(reason: str) -> AbstractAsyncContextManager[AsyncSession]:
@@ -109,6 +114,42 @@ def _validate_registration(transport: str, command: str | None, url: str | None)
         validate_outbound_url(url, allow_private=settings.mcp_allow_private_urls)
 
 
+async def _lock_server_name(db: AsyncSession, name: str) -> None:
+    """Serialize collision checks for one display name on PostgreSQL."""
+    bind = db.get_bind()
+    if bind.dialect.name == "postgresql":
+        await db.execute(text("SELECT pg_advisory_xact_lock(hashtext(:name))"), {"name": name})
+
+
+async def _name_conflicts(
+    db: AsyncSession,
+    *,
+    name: str,
+    owner_id: uuid.UUID | None,
+    is_system: bool,
+    exclude_id: uuid.UUID | None = None,
+) -> bool:
+    """Return whether *name* would collide in the registration's namespace."""
+    stmt = select(MCPServerConfig.id).where(MCPServerConfig.name == name)
+    if exclude_id is not None:
+        stmt = stmt.where(MCPServerConfig.id != exclude_id)
+    if is_system:
+        # A system registration is visible to every owner, so it cannot be
+        # introduced when any namespace already uses the same display name.
+        pass
+    elif owner_id is None:
+        stmt = stmt.where(MCPServerConfig.owner_id.is_(None))
+    else:
+        stmt = stmt.where(
+            or_(MCPServerConfig.owner_id == owner_id, MCPServerConfig.is_system.is_(True))
+        )
+    return (await db.execute(stmt.limit(1))).scalar_one_or_none() is not None
+
+
+def _raise_name_conflict(name: str) -> None:
+    raise MCPServerNameConflictError(f"MCP server name '{name}' is already in use in this namespace")
+
+
 async def register_server(
     *,
     name: str,
@@ -129,29 +170,54 @@ async def register_server(
     the same way a run resolves an ``is_system`` agent (``Agent.owner_id``
     docstring) regardless of who started it.
     """
+    if is_system and owner_id is not None:
+        raise ValueError("System MCP servers must be ownerless")
     _validate_registration(transport, command, url)
 
-    reg = registry or get_registry()
-    tp = TransportType(transport)
-    entry = await reg.register(name=name, transport=tp, command=command, url=url, headers=headers)
-
     config = MCPServerConfig(
+        id=uuid.uuid4(),
         name=name,
         transport=MCPTransport(transport),
         command=command,
         url=url,
         headers_encrypted=_encrypt_headers(headers),
-        capabilities=_capabilities_for(entry.client) if entry.client.connected else None,
-        status=MCPServerStatus.CONNECTED if entry.client.connected else MCPServerStatus.ERROR,
-        error_message=entry.error,
+        capabilities=None,
+        status=MCPServerStatus.DISCONNECTED,
+        error_message=None,
         owner_id=owner_id,
         is_system=is_system,
     )
     async with _session("register_server") as db:
-        db.add(config)
+        await _lock_server_name(db, name)
+        if await _name_conflicts(db, name=name, owner_id=owner_id, is_system=is_system):
+            _raise_name_conflict(name)
+        try:
+            db.add(config)
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            raise MCPServerNameConflictError(
+                f"MCP server name '{name}' is already in use in this namespace"
+            ) from exc
+
+    reg = registry or get_registry()
+    entry = await reg.register(
+        server_id=config.id,
+        name=name,
+        owner_id=owner_id,
+        is_system=is_system,
+        transport=TransportType(transport),
+        command=command,
+        url=url,
+        headers=headers,
+    )
+    async with _session("register_server outcome") as db:
+        persisted = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == config.id))
+        ).scalar_one()
+        await _persist_connection_outcome(db, persisted, entry)
         await db.commit()
-        await db.refresh(config)
-    return config
+        return persisted
 
 
 async def get_server(server_id: uuid.UUID) -> MCPServerConfig | None:
@@ -160,10 +226,19 @@ async def get_server(server_id: uuid.UUID) -> MCPServerConfig | None:
         return (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
 
 
-async def get_server_by_name(name: str) -> MCPServerConfig | None:
-    """Fetch a server by name, or ``None``."""
+async def get_server_by_name(name: str, *, owner_id: uuid.UUID | None = None) -> MCPServerConfig | None:
+    """Fetch a server by name within one owner namespace.
+
+    System registrations are included for an owner. With ``owner_id=None``,
+    only ownerless registrations are considered.
+    """
+    stmt = select(MCPServerConfig).where(MCPServerConfig.name == name)
+    if owner_id is None:
+        stmt = stmt.where(MCPServerConfig.owner_id.is_(None))
+    else:
+        stmt = stmt.where(or_(MCPServerConfig.owner_id == owner_id, MCPServerConfig.is_system.is_(True)))
     async with _session("get_server_by_name") as db:
-        return (await db.execute(select(MCPServerConfig).where(MCPServerConfig.name == name))).scalar_one_or_none()
+        return (await db.execute(stmt)).scalar_one_or_none()
 
 
 async def list_servers(*, owner_id: uuid.UUID | None = None) -> Sequence[MCPServerConfig]:
@@ -190,7 +265,7 @@ async def delete_server(server_id: uuid.UUID, *, registry: MCPServerRegistry | N
         if config is None:
             return False
         reg = registry or get_registry()
-        await reg.unregister(config.name)
+        await reg.unregister(config.id)
         await db.delete(config)
         await db.commit()
         return True
@@ -221,7 +296,7 @@ async def refresh_server(server_id: uuid.UUID, *, registry: MCPServerRegistry | 
         config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
         if config is None:
             return None
-        entry = await reg.refresh_server(config.name)
+        entry = await reg.refresh_server(config.id)
         await _persist_connection_outcome(db, config, entry, refresh_only=True)
         await db.commit()
         return config
@@ -237,7 +312,10 @@ async def reconnect_server(
         if config is None:
             return None
         entry = await reg.register(
+            server_id=config.id,
             name=config.name,
+            owner_id=config.owner_id,
+            is_system=config.is_system,
             transport=TransportType(config.transport.value),
             command=config.command,
             url=config.url,
@@ -270,6 +348,15 @@ async def update_server(
         _validate_registration(effective_transport, effective_command, effective_url)
 
         if name is not None:
+            await _lock_server_name(db, name)
+            if await _name_conflicts(
+                db,
+                name=name,
+                owner_id=config.owner_id,
+                is_system=config.is_system,
+                exclude_id=config.id,
+            ):
+                _raise_name_conflict(name)
             config.name = name
         if transport is not None:
             config.transport = MCPTransport(transport)
@@ -279,11 +366,19 @@ async def update_server(
             config.url = url
         if headers is not None:
             config.headers_encrypted = _encrypt_headers(headers)
-        await db.flush()
+        try:
+            await db.flush()
+        except IntegrityError as exc:
+            raise MCPServerNameConflictError(
+                f"MCP server name '{config.name}' is already in use in this namespace"
+            ) from exc
 
         reg = registry or get_registry()
         entry = await reg.register(
+            server_id=config.id,
             name=config.name,
+            owner_id=config.owner_id,
+            is_system=config.is_system,
             transport=TransportType(config.transport.value),
             command=config.command,
             url=config.url,
@@ -311,7 +406,7 @@ async def call_server_tool(
     if config is None:
         return None
     reg = registry or get_registry()
-    entry = reg.get(config.name)
+    entry = reg.get(config.id)
     if entry is None or not entry.client.connected:
         raise RuntimeError(f"MCP server '{config.name}' is not connected")
     result = await entry.client.call_tool(tool_name, arguments, meta=meta)
@@ -367,7 +462,10 @@ async def hydrate_registry(*, registry: MCPServerRegistry | None = None) -> list
     for config in configs:
         try:
             entry = await reg.ensure_registered(
+                server_id=config.id,
                 name=config.name,
+                owner_id=config.owner_id,
+                is_system=config.is_system,
                 transport=TransportType(config.transport.value),
                 command=config.command,
                 url=config.url,

@@ -7,6 +7,7 @@ import hashlib
 import json
 import re
 import time
+import uuid
 from typing import Any
 
 import structlog
@@ -122,6 +123,8 @@ class MCPToolExecutor:
     def can_handle(self, step: PlanStep, context: RunContext | None = None) -> bool:
         """Check if this step specifies a tool that we can execute.
 
+        The tool must be in the supplied context's run allow-list. With no
+        context this returns ``False`` rather than consulting the global registry.
         When *context* is supplied the tool must also be in the run's allow-list
         (``context.available_tools``) — a tool that resolves in the global
         registry but was not granted to this run does not count as handleable
@@ -131,13 +134,14 @@ class MCPToolExecutor:
         """
         if not step.tool_name:
             return False
-        resolved = self._resolve_tool(step.tool_name)
+        allowed_tools = context.available_tools if context is not None else []
+        resolved = self._resolve_tool(step.tool_name, allowed_tools)
         if resolved is None:
             return False
         if context is None:
             return True
-        server_name, bare_tool, _client = resolved
-        return _tool_in_allowlist(server_name, bare_tool, context.available_tools)
+        server_id, server_name, bare_tool, _client = resolved
+        return _tool_in_allowlist(server_id, server_name, bare_tool, context.available_tools)
 
     async def execute_step(
         self, step: PlanStep, context: RunContext
@@ -149,7 +153,9 @@ class MCPToolExecutor:
         if not step.tool_name:
             raise ValueError("Step has no tool_name")
 
-        server_name, tool_name, client, tool_info = self._resolve_tool_with_info(step.tool_name)
+        server_id, server_name, tool_name, client, tool_info = self._resolve_tool_with_info(
+            step.tool_name, context.available_tools
+        )
         arguments = dict(step.tool_args) if step.tool_args else {}
         # Redacted copy used in ToolCallRecord persistence and logs — never the live dict.
         safe_args = redact_tool_args(arguments)
@@ -168,7 +174,7 @@ class MCPToolExecutor:
         # (server, tool) identity is not in that set — fail-closed, so an empty
         # allow-list permits no tools. Not retried: re-invoking would reject
         # again.
-        if not _tool_in_allowlist(server_name, tool_name, context.available_tools):
+        if not _tool_in_allowlist(server_id, server_name, tool_name, context.available_tools):
             error_msg = f"Tool '{step.tool_name}' is not in this run's allowed tool set"
             tool_record = ToolCallRecord(
                 server=server_name,
@@ -349,24 +355,29 @@ class MCPToolExecutor:
             tool_record=tool_record,
         ) from last_error
 
-    def _resolve_tool(self, tool_name: str) -> tuple[str, str, MCPClient] | None:
+    def _resolve_tool(
+        self, tool_name: str, available_tools: list[dict[str, Any]]
+    ) -> tuple[uuid.UUID, str, str, MCPClient] | None:
         """Resolve a tool name. Returns None if not found."""
         try:
-            server, bare, client, _ = self._resolve_tool_with_info(tool_name)
-            return server, bare, client
+            server_id, server, bare, client, _ = self._resolve_tool_with_info(tool_name, available_tools)
+            return server_id, server, bare, client
         except ValueError:
             return None
 
-    def _resolve_tool_with_info(self, tool_name: str) -> tuple[str, str, MCPClient, ToolInfo | None]:
-        """Resolve a tool name to (server_name, tool_name, client, tool_info).
+    def _resolve_tool_with_info(
+        self, tool_name: str, available_tools: list[dict[str, Any]]
+    ) -> tuple[uuid.UUID, str, str, MCPClient, ToolInfo | None]:
+        """Resolve only within the registrations granted by the run catalogue.
 
         Issue #746 — delegates the actual lookup to the registry, which keeps an
         index instead of scanning every server's tool list.
         """
-        resolved = self._registry.lookup_tool(tool_name)
+        allowed_ids = _allowed_server_ids(available_tools)
+        resolved = self._registry.lookup_tool(tool_name, server_ids=allowed_ids)
         if resolved is None:
-            raise ValueError(f"Tool '{tool_name}' not found in any connected MCP server")
-        server_name, bare_tool, client, tool_info = resolved
+            raise ValueError(f"Tool '{tool_name}' not found in this run's connected MCP servers")
+        server_id, server_name, bare_tool, client, tool_info = resolved
         log.debug(
             "mcp.tool.resolved",
             tool=tool_name,
@@ -374,10 +385,25 @@ class MCPToolExecutor:
             method="namespaced" if "." in tool_name else "bare",
             component="mcp_executor",
         )
-        return server_name, bare_tool, client, tool_info
+        return server_id, server_name, bare_tool, client, tool_info
+
+
+def _allowed_server_ids(available_tools: list[dict[str, Any]]) -> frozenset[uuid.UUID]:
+    """Extract persisted registration identities from a run's tool descriptors."""
+    server_ids: set[uuid.UUID] = set()
+    for tool in available_tools:
+        raw = tool.get("server_id")
+        if not raw:
+            continue
+        try:
+            server_ids.add(uuid.UUID(str(raw)))
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return frozenset(server_ids)
 
 
 def _tool_in_allowlist(
+    server_id: uuid.UUID,
     server_name: str,
     bare_tool: str,
     available_tools: list[dict[str, Any]],
@@ -388,20 +414,15 @@ def _tool_in_allowlist(
     from ``run_service._gather_tools`` (issue #1454). Entries from
     :meth:`MCPServerRegistry.get_all_tools` carry ``server`` + ``tool_name`` plus
     a namespaced ``name`` (``server.tool``); matching against the *resolved*
-    identity makes namespaced vs bare requests behave identically, since both
-    resolve to the same ``(server, tool)`` pair before we get here.
+    identity makes namespaced vs bare requests behave identically. The persisted
+    registration ID is required; name-only legacy descriptors fail closed.
     """
-    full_name = f"{server_name}.{bare_tool}"
     for tool in available_tools:
+        t_server_id = tool.get("server_id")
         t_server = tool.get("server")
         t_bare = str(tool.get("tool_name") or "")
-        t_full = str(tool.get("name") or "")
         # Precise match on the resolved server + bare tool name.
-        if t_server == server_name and t_bare == bare_tool:
-            return True
-        # Fall back to name-only descriptors (no structured server/tool_name),
-        # accepting either the namespaced or the bare form.
-        if t_full and t_full in (full_name, bare_tool):
+        if str(t_server_id or "") == str(server_id) and t_server == server_name and t_bare == bare_tool:
             return True
     return False
 
@@ -556,9 +577,11 @@ def build_openai_tool_name_map(tools: list[dict[str, Any]]) -> dict[str, str]:
     return mapping
 
 
-def get_tools_for_context(registry: MCPServerRegistry) -> list[dict[str, Any]]:
+def get_tools_for_context(
+    registry: MCPServerRegistry, *, owner_id: uuid.UUID | None = None
+) -> list[dict[str, Any]]:
     """Get tool descriptions formatted for the Sense phase context."""
-    return registry.get_all_tools()
+    return registry.get_all_tools(owner_id=owner_id)
 
 
 def format_tool_for_prompt(tool: dict[str, Any]) -> str:

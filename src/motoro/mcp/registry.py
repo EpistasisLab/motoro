@@ -5,6 +5,8 @@ from __future__ import annotations
 import asyncio
 import os
 import threading
+import uuid
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from typing import Any
 
@@ -19,7 +21,10 @@ log = structlog.get_logger()
 class ServerEntry:
     """A registered server with its client."""
 
+    server_id: uuid.UUID
     name: str
+    owner_id: uuid.UUID | None
+    is_system: bool
     transport: TransportType
     command: str | None
     url: str | None
@@ -38,16 +43,19 @@ class MCPServerRegistry:
     """
 
     def __init__(self) -> None:
-        self._servers: dict[str, ServerEntry] = {}
+        self._servers: dict[uuid.UUID, ServerEntry] = {}
         self._lock = asyncio.Lock()
 
     @property
-    def servers(self) -> dict[str, ServerEntry]:
+    def servers(self) -> dict[uuid.UUID, ServerEntry]:
         return dict(self._servers)
 
     async def register(
         self,
+        server_id: uuid.UUID,
         name: str,
+        owner_id: uuid.UUID | None = None,
+        is_system: bool = False,
         transport: TransportType = TransportType.STDIO,
         command: str | None = None,
         url: str | None = None,
@@ -56,18 +64,21 @@ class MCPServerRegistry:
     ) -> ServerEntry:
         """Register and connect to a new MCP server.
 
-        Always replaces an existing entry of the same name, disconnecting it
+        Always replaces the existing entry for the same registration ID, disconnecting it
         first -- use :meth:`ensure_registered` for "connect this only if it
         isn't already live", which is what most callers actually want.
 
         The entire register cycle (existing-entry disconnect + new connect +
         slot write) runs under ``self._lock`` so two concurrent calls for the
-        same name cannot observe a half-removed slot and double-register
+        same registration cannot observe a half-removed slot and double-register
         (Issue #729).
         """
         async with self._lock:
             return await self._register_locked(
+                server_id=server_id,
                 name=name,
+                owner_id=owner_id,
+                is_system=is_system,
                 transport=transport,
                 command=command,
                 url=url,
@@ -78,7 +89,10 @@ class MCPServerRegistry:
     async def _register_locked(
         self,
         *,
+        server_id: uuid.UUID,
         name: str,
+        owner_id: uuid.UUID | None,
+        is_system: bool,
         transport: TransportType,
         command: str | None,
         url: str | None,
@@ -86,10 +100,10 @@ class MCPServerRegistry:
         server_env: dict[str, str] | None,
     ) -> ServerEntry:
         """Internal helper: must be called with ``self._lock`` held."""
-        if name in self._servers:
+        if server_id in self._servers:
             # Locked path: unregister the old entry inline so we don't
             # acquire the lock recursively (asyncio.Lock is not reentrant).
-            await self._unregister_locked(name)
+            await self._unregister_locked(server_id)
 
         client = MCPClient(
             name=name,
@@ -100,7 +114,10 @@ class MCPServerRegistry:
             server_env=server_env,
         )
         entry = ServerEntry(
+            server_id=server_id,
             name=name,
+            owner_id=owner_id,
+            is_system=is_system,
             transport=transport,
             command=command,
             url=url,
@@ -118,7 +135,7 @@ class MCPServerRegistry:
                 component="mcp_registry",
             )
 
-        self._servers[name] = entry
+        self._servers[server_id] = entry
 
         if entry.client.connected:
             log.info(
@@ -132,14 +149,17 @@ class MCPServerRegistry:
 
     async def ensure_registered(
         self,
+        server_id: uuid.UUID,
         name: str,
+        owner_id: uuid.UUID | None = None,
+        is_system: bool = False,
         transport: TransportType = TransportType.STDIO,
         command: str | None = None,
         url: str | None = None,
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
     ) -> ServerEntry:
-        """Register *name* only if it isn't already connected.
+        """Register *server_id* only if it isn't already connected.
 
         ``register`` unconditionally tears down and replaces an existing entry,
         which is right for "the user changed this server's config, reconnect
@@ -157,11 +177,14 @@ class MCPServerRegistry:
         so this never leaves a dead slot in place.
         """
         async with self._lock:
-            existing = self._servers.get(name)
+            existing = self._servers.get(server_id)
             if existing is not None and existing.client.connected:
                 return existing
             return await self._register_locked(
+                server_id=server_id,
                 name=name,
+                owner_id=owner_id,
+                is_system=is_system,
                 transport=transport,
                 command=command,
                 url=url,
@@ -169,25 +192,57 @@ class MCPServerRegistry:
                 server_env=server_env,
             )
 
-    async def unregister(self, name: str) -> None:
+    async def unregister(self, server_id: uuid.UUID) -> None:
         """Disconnect and remove a server (locked)."""
         async with self._lock:
-            await self._unregister_locked(name)
+            await self._unregister_locked(server_id)
 
-    async def _unregister_locked(self, name: str) -> None:
+    async def _unregister_locked(self, server_id: uuid.UUID) -> None:
         """Internal helper: must be called with ``self._lock`` held."""
-        entry = self._servers.pop(name, None)
+        entry = self._servers.pop(server_id, None)
         if entry and entry.client.connected:
             await entry.client.disconnect()
         if entry:
-            log.info("mcp.server.unregistered", server=name, component="mcp_registry")
+            log.info(
+                "mcp.server.unregistered",
+                server=entry.name,
+                server_id=str(server_id),
+                component="mcp_registry",
+            )
 
-    def get(self, name: str) -> ServerEntry | None:
-        """Get a server entry by name."""
-        return self._servers.get(name)
+    def get(self, server_id: uuid.UUID) -> ServerEntry | None:
+        """Get a server entry by its persisted registration ID."""
+        return self._servers.get(server_id)
 
-    def lookup_tool(self, tool_name: str) -> tuple[str, str, MCPClient, ToolInfo] | None:
-        """Resolve *tool_name* to ``(server, bare_name, client, tool_info)``. Issue #746.
+    def _scoped_entries(
+        self,
+        *,
+        owner_id: uuid.UUID | None = None,
+        server_ids: Collection[uuid.UUID] | None = None,
+    ) -> Iterable[tuple[uuid.UUID, ServerEntry]]:
+        """Return entries visible to one owner or explicitly granted by ID.
+
+        Explicit IDs are the execution-time seam: callers pass the IDs carried
+        by the run's tool descriptors. Without them, discovery is owner-scoped;
+        ``owner_id=None`` deliberately exposes system registrations only.
+        """
+        if server_ids is not None:
+            allowed = frozenset(server_ids)
+            return ((server_id, entry) for server_id, entry in self._servers.items() if server_id in allowed)
+        return (
+            (server_id, entry)
+            for server_id, entry in self._servers.items()
+            if entry.is_system or (owner_id is not None and entry.owner_id == owner_id)
+        )
+
+    def lookup_tool(
+        self,
+        tool_name: str,
+        *,
+        owner_id: uuid.UUID | None = None,
+        server_ids: Collection[uuid.UUID] | None = None,
+    ) -> tuple[uuid.UUID, str, str, MCPClient, ToolInfo] | None:
+        """Resolve within a scoped set to ``(server_id, server, bare_name, client, tool_info)``.
 
         Supports both ``server.tool`` namespaced names and bare names. For bare
         names we build an index across all connected servers; if more than one
@@ -195,23 +250,26 @@ class MCPServerRegistry:
         match (preserving previous behaviour — callers should namespace to be
         unambiguous).
         """
-        # Namespaced lookup is direct.
+        entries = list(self._scoped_entries(owner_id=owner_id, server_ids=server_ids))
+
+        # Namespaced lookup is scoped before matching the display name.
         if "." in tool_name:
             server_name, bare = tool_name.split(".", 1)
-            entry = self._servers.get(server_name)
-            if entry and entry.client.connected:
+            for server_id, entry in entries:
+                if entry.name != server_name or not entry.client.connected:
+                    continue
                 for tool in entry.client.tools:
                     if tool.name == bare:
-                        return server_name, bare, entry.client, tool
+                        return server_id, server_name, bare, entry.client, tool
             return None
 
         # Bare-name index: O(1) lookup, ambiguity warning on collisions.
-        index: dict[str, list[tuple[str, MCPClient, ToolInfo]]] = {}
-        for server_name, entry in self._servers.items():
+        index: dict[str, list[tuple[uuid.UUID, str, MCPClient, ToolInfo]]] = {}
+        for server_id, entry in entries:
             if not entry.client.connected:
                 continue
             for tool in entry.client.tools:
-                index.setdefault(tool.name, []).append((server_name, entry.client, tool))
+                index.setdefault(tool.name, []).append((server_id, entry.name, entry.client, tool))
 
         candidates = index.get(tool_name)
         if not candidates:
@@ -220,26 +278,33 @@ class MCPServerRegistry:
             log.warning(
                 "mcp.tool.bare_name_collision",
                 tool=tool_name,
-                servers=[c[0] for c in candidates],
-                resolved=candidates[0][0],
+                servers=[c[1] for c in candidates],
+                resolved=candidates[0][1],
                 component="mcp_registry",
             )
-        server_name, client, tool_info = candidates[0]
-        return server_name, tool_name, client, tool_info
+        server_id, server_name, client, tool_info = candidates[0]
+        return server_id, server_name, tool_name, client, tool_info
 
-    def get_all_tools(self) -> list[dict[str, Any]]:
+    def get_all_tools(
+        self,
+        *,
+        owner_id: uuid.UUID | None = None,
+        server_ids: Collection[uuid.UUID] | None = None,
+    ) -> list[dict[str, Any]]:
         """Get aggregated tool list across all connected servers.
 
-        Tool names are namespaced as '{server_name}.{tool_name}'.
+        Tool names are namespaced as '{server_name}.{tool_name}'. Discovery is
+        owner-scoped (owner plus system entries) unless exact IDs are supplied.
         """
         tools: list[dict[str, Any]] = []
-        for name, entry in self._servers.items():
+        for server_id, entry in self._scoped_entries(owner_id=owner_id, server_ids=server_ids):
             if entry.client.connected:
                 for tool in entry.client.tools:
                     tools.append(
                         {
-                            "name": f"{name}.{tool.name}",
-                            "server": name,
+                            "name": f"{entry.name}.{tool.name}",
+                            "server": entry.name,
+                            "server_id": str(server_id),
                             "tool_name": tool.name,
                             "description": tool.description,
                             "input_schema": tool.input_schema,
@@ -251,14 +316,14 @@ class MCPServerRegistry:
                     )
         return tools
 
-    async def refresh_server(self, name: str) -> ServerEntry | None:
+    async def refresh_server(self, server_id: uuid.UUID) -> ServerEntry | None:
         """Refresh tool discovery for a single server (locked, Issue #708).
 
         Holding the lock during refresh prevents an in-flight register or
         unregister from racing with the cache update.
         """
         async with self._lock:
-            entry = self._servers.get(name)
+            entry = self._servers.get(server_id)
             if entry is None or not entry.client.connected:
                 return entry
             try:
@@ -268,20 +333,21 @@ class MCPServerRegistry:
                 entry.error = f"Refresh failed: {type(e).__name__}: {e}"
                 log.warning(
                     "mcp.server.refresh_failed",
-                    server=name,
+                    server=entry.name,
+                    server_id=str(server_id),
                     error=entry.error,
                     component="mcp_registry",
                 )
             return entry
 
-    async def check_health(self) -> dict[str, bool]:
-        """Check which servers are still alive. Returns {name: is_alive}."""
-        results: dict[str, bool] = {}
-        for name, entry in self._servers.items():
+    async def check_health(self) -> dict[uuid.UUID, bool]:
+        """Check which registrations are still alive. Returns {id: is_alive}."""
+        results: dict[uuid.UUID, bool] = {}
+        for server_id, entry in self._servers.items():
             if entry.client.connected:
-                results[name] = await entry.client.is_alive()
+                results[server_id] = await entry.client.is_alive()
             else:
-                results[name] = False
+                results[server_id] = False
         return results
 
     async def disconnect_all(self) -> None:
