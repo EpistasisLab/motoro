@@ -10,9 +10,11 @@ from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 import structlog
 
 from motoro.mcp.client import MCPClient, ToolInfo, TransportType
+from motoro.mcp.oauth import MCPReauthorizationRequiredError
 
 log = structlog.get_logger()
 
@@ -30,6 +32,7 @@ class ServerEntry:
     url: str | None
     client: MCPClient
     error: str | None = None
+    reauthorization_required: bool = False
 
 
 class MCPServerRegistry:
@@ -61,6 +64,7 @@ class MCPServerRegistry:
         url: str | None = None,
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
+        http_auth: httpx.Auth | None = None,
     ) -> ServerEntry:
         """Register and connect to a new MCP server.
 
@@ -84,6 +88,7 @@ class MCPServerRegistry:
                 url=url,
                 headers=headers,
                 server_env=server_env,
+                http_auth=http_auth,
             )
 
     async def _register_locked(
@@ -98,6 +103,7 @@ class MCPServerRegistry:
         url: str | None,
         headers: dict[str, str] | None,
         server_env: dict[str, str] | None,
+        http_auth: httpx.Auth | None,
     ) -> ServerEntry:
         """Internal helper: must be called with ``self._lock`` held."""
         if server_id in self._servers:
@@ -112,6 +118,7 @@ class MCPServerRegistry:
             url=url,
             headers=headers,
             server_env=server_env,
+            http_auth=http_auth,
         )
         entry = ServerEntry(
             server_id=server_id,
@@ -127,6 +134,7 @@ class MCPServerRegistry:
         try:
             await client.connect()
         except BaseException as e:
+            entry.reauthorization_required = isinstance(e, MCPReauthorizationRequiredError)
             entry.error = f"{type(e).__name__}: {e}"
             log.warning(
                 "mcp.server.register_failed",
@@ -158,6 +166,7 @@ class MCPServerRegistry:
         url: str | None = None,
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
+        http_auth: httpx.Auth | None = None,
     ) -> ServerEntry:
         """Register *server_id* only if it isn't already connected.
 
@@ -190,6 +199,7 @@ class MCPServerRegistry:
                 url=url,
                 headers=headers,
                 server_env=server_env,
+                http_auth=http_auth,
             )
 
     async def unregister(self, server_id: uuid.UUID) -> None:

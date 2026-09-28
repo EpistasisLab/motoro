@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from typing import Any
 
 from mcp.server.fastmcp import Context, FastMCP
@@ -42,6 +43,12 @@ def echo_meta(ctx: Context[Any, Any, Any]) -> str:
     just what the sender intended to build."""
     meta = ctx.request_context.meta
     return json.dumps(getattr(meta, "model_extra", None) or {})
+
+
+@mcp.tool()
+def environment_has(name: str) -> bool:
+    """Report presence only, so credential values never cross the MCP boundary."""
+    return name in os.environ
 
 
 @mcp.tool()

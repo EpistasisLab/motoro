@@ -366,9 +366,7 @@ async def test_same_name_tool_execution_routes_through_the_run_registration_ids(
 
     try:
         bare = PlanStep(action="echo", description="echo", tool_name="echo", tool_args={"text": "hi"})
-        namespaced = PlanStep(
-            action="echo", description="echo", tool_name=f"{name}.echo", tool_args={"text": "hi"}
-        )
+        namespaced = PlanStep(action="echo", description="echo", tool_name=f"{name}.echo", tool_args={"text": "hi"})
         first_result, _, _ = await _with_timeout(executor.execute_step(bare, context(owner_a)))
         second_result, _, _ = await _with_timeout(executor.execute_step(namespaced, context(owner_b)))
         assert first_result == "owner-a: hi"
@@ -774,6 +772,65 @@ async def test_update_server_reconnects_with_new_settings() -> None:
 
 
 @needs_db
+async def test_stdio_credentials_are_encrypted_replaced_cleared_and_hydrated() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import (
+        call_server_tool,
+        get_authentication_status,
+        hydrate_registry,
+        register_server,
+        update_server,
+    )
+
+    original = MCPServerRegistry()
+    first_secret = "first-stdio-secret"
+    config = await _with_timeout(
+        register_server(
+            name=f"echo-env-{uuid.uuid4().hex[:8]}",
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            server_env={"PRODUCT_API_TOKEN": first_secret},
+            registry=original,
+        )
+    )
+    try:
+        assert config.stdio_env_encrypted is not None
+        assert first_secret not in config.stdio_env_encrypted
+        assert await call_server_tool(
+            config.id, "environment_has", {"name": "PRODUCT_API_TOKEN"}, registry=original
+        ) == (False, "true")
+        status = await get_authentication_status(config.id)
+        assert status.auth_mode == "stdio_env"
+        assert status.stdio_env_names == ("PRODUCT_API_TOKEN",)
+
+        replacement = "replacement-stdio-secret"
+        replaced = await _with_timeout(
+            update_server(
+                config.id,
+                server_env={"REPLACEMENT_TOKEN": replacement},
+                registry=original,
+            )
+        )
+        assert replacement not in replaced.stdio_env_encrypted
+        assert first_secret not in replaced.stdio_env_encrypted
+
+        fresh = MCPServerRegistry()
+        try:
+            assert await _with_timeout(hydrate_registry(registry=fresh)) == []
+            assert await call_server_tool(
+                config.id, "environment_has", {"name": "REPLACEMENT_TOKEN"}, registry=fresh
+            ) == (False, "true")
+        finally:
+            await fresh.disconnect_all()
+
+        cleared = await _with_timeout(update_server(config.id, server_env=None, registry=original))
+        assert cleared.stdio_env_encrypted is None
+        assert (await get_authentication_status(config.id)).auth_mode == "none"
+    finally:
+        await original.disconnect_all()
+
+
+@needs_db
 async def test_call_server_tool_invokes_and_returns_content() -> None:
     from motoro.mcp.registry import MCPServerRegistry
     from motoro.services.mcp_service import call_server_tool, register_server
@@ -890,9 +947,7 @@ async def test_concurrent_hydration_retains_both_same_name_registrations() -> No
     )
     hydrated = MCPServerRegistry()
     try:
-        outcomes = await _with_timeout(
-            asyncio.gather(*(hydrate_registry(registry=hydrated) for _ in range(4)))
-        )
+        outcomes = await _with_timeout(asyncio.gather(*(hydrate_registry(registry=hydrated) for _ in range(4))))
         assert outcomes == [[], [], [], []]
         assert set(hydrated.servers) == {first.id, second.id}
         assert all(entry.client.connected for entry in hydrated.servers.values())

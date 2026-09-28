@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, Index, String, Text, func, text
+from sqlalchemy import Boolean, DateTime, Enum, Index, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -47,6 +47,7 @@ class MCPServerConfig(Base):
 
     __tablename__ = "mcp_server_configs"
     __table_args__ = (
+        UniqueConstraint("oauth_state_hash", name="uq_mcp_server_configs_oauth_state_hash"),
         Index(
             "uq_mcp_server_configs_owner_name",
             "owner_id",
@@ -89,6 +90,16 @@ class MCPServerConfig(Base):
         default=MCPServerStatus.DISCONNECTED,
     )
     headers_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    stdio_env_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    oauth_pending_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # SHA-256 only: permits indexed callback-state lookup without making the
+    # bearer-like raw state visible at rest.  The raw state and PKCE verifier
+    # live only inside oauth_pending_encrypted.
+    oauth_state_hash: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    oauth_authorization_required: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default="false", default=False
+    )
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", default=False)
     # Opaque attribution tag — see the module docstring and Agent.owner_id.
@@ -100,3 +111,10 @@ class MCPServerConfig(Base):
         onupdate=func.now(),
         nullable=False,
     )
+
+    def __repr__(self) -> str:
+        """Safe representation which never includes encrypted credential blobs."""
+        return (
+            f"MCPServerConfig(id={self.id!r}, name={self.name!r}, transport={self.transport.value!r}, "
+            f"status={self.status.value!r}, owner_id={self.owner_id!r}, is_system={self.is_system!r})"
+        )

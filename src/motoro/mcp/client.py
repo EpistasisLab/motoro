@@ -24,6 +24,7 @@ from opentelemetry import trace
 
 from motoro.config import settings
 from motoro.observability.tracing import get_tracer
+from motoro.security.mcp_credentials import validate_stdio_env
 from motoro.services.retry import retry_with_backoff
 
 log = structlog.get_logger()
@@ -81,9 +82,9 @@ def build_subprocess_env(
     Only variables in the allowlist (default + user-configured via
     ``ARES_MCP_ALLOWED_ENV_VARS``) are copied from the host environment.
 
-    MCP server configs may declare specific env vars they need via
-    ``server_env``. These are validated against the allowlist; any
-    variable not in the allowlist is rejected and logged.
+    Host inheritance is restricted to the allowlist. Explicit ``server_env``
+    values are instead validated against the process-injection denylist and do
+    not need to exist in the host environment or its inheritance allowlist.
 
     Environment isolation prevents secrets (API keys, JWT secrets, DB
     credentials) from leaking to untrusted MCP server subprocesses.
@@ -98,18 +99,9 @@ def build_subprocess_env(
         if key in allowed_env_vars:
             env[key] = value
 
-    # Merge server-declared env vars (validated against allowlist)
+    # Merge explicitly configured values after injection-focused validation.
     if server_env:
-        for key, value in server_env.items():
-            if key in allowed_env_vars:
-                env[key] = value
-            else:
-                log.warning(
-                    "mcp.env.rejected",
-                    var=key,
-                    reason="not in allowlist",
-                    component="mcp",
-                )
+        env.update(validate_stdio_env(server_env))
 
     return env
 
@@ -174,6 +166,7 @@ class MCPClient:
         url: str | None = None,
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
+        http_auth: httpx.Auth | None = None,
         on_tools_changed: Callable[[MCPClient], Awaitable[None]] | None = None,
     ) -> None:
         self.name = name
@@ -182,6 +175,7 @@ class MCPClient:
         self._url = url
         self._headers = headers or {}
         self._server_env = server_env
+        self._http_auth = http_auth
         self._tools: list[ToolInfo] = []
         # The server's own ``instructions`` from the initialize handshake --
         # its description of itself, as distinct from any per-tool
@@ -451,7 +445,11 @@ class MCPClient:
         """
         if not self._url:
             raise ValueError("HTTP transport requires a url")
-        self._http_client = httpx.AsyncClient(headers=self._headers, timeout=httpx.Timeout(30.0, connect=10.0))
+        self._http_client = httpx.AsyncClient(
+            headers=self._headers,
+            auth=self._http_auth,
+            timeout=httpx.Timeout(30.0, connect=10.0),
+        )
         self._cm = streamable_http_client(self._url, http_client=self._http_client)
         try:
             streams = await asyncio.wait_for(self._cm.__aenter__(), timeout=30)
