@@ -31,7 +31,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import urlencode, urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse
 
 import httpx
 from mcp.client.auth.oauth2 import PKCEParameters
@@ -447,6 +447,7 @@ async def _refresh_oauth_under_lock(
     expected_issuer: str,
     expected_url: str,
     observed: dict[str, Any],
+    force: bool = False,
 ) -> dict[str, Any]:
     """Serialize refresh on the server row and atomically persist token rotation.
 
@@ -475,7 +476,10 @@ async def _refresh_oauth_under_lock(
             or current.get("server_id") != str(server_id)
         ):
             raise MCPReauthorizationRequiredError("MCP OAuth credential binding changed")
-        if _oauth_payload_valid(current):
+        current_access = (current.get("token") or {}).get("access_token")
+        observed_access = (observed.get("token") or {}).get("access_token")
+        another_process_rotated = current_access != observed_access
+        if _oauth_payload_valid(current) and (not force or another_process_rotated):
             return current
 
         token = current.get("token") or {}
@@ -554,8 +558,8 @@ def _oauth_auth_for(config: MCPServerConfig) -> PersistentOAuthAuth | None:
     issuer = str(payload.get("issuer") or "")
     server_url = config.url
 
-    async def refresh(observed: dict[str, Any]) -> dict[str, Any]:
-        return await _refresh_oauth_under_lock(config.id, issuer, server_url, observed)
+    async def refresh(observed: dict[str, Any], force: bool) -> dict[str, Any]:
+        return await _refresh_oauth_under_lock(config.id, issuer, server_url, observed, force)
 
     async def mark_required(observed: dict[str, Any]) -> None:
         await _mark_oauth_reauthorization_required(config.id, observed)
@@ -700,6 +704,13 @@ async def update_server(
             config.url = url
         if not isinstance(headers, CredentialNotSupplied):
             config.headers_encrypted = _encrypt_headers(headers)
+            if headers:
+                # Static credentials explicitly supersede an authorization
+                # transaction that may still be exchanging its code in a
+                # different process. The callback CAS below will reject it.
+                config.oauth_pending_encrypted = None
+                config.oauth_state_hash = None
+                config.oauth_authorization_required = False
         if not isinstance(server_env, CredentialNotSupplied):
             config.stdio_env_encrypted = _encrypt_stdio_env(server_env)
         _bump_config_revision(config)
@@ -847,6 +858,13 @@ def _validate_redirect_uri(redirect_uri: str) -> None:
         raise MCPAuthConfigurationError("OAuth redirect URI must not contain a fragment")
 
 
+def _authorization_url(endpoint_url: str, params: dict[str, str]) -> str:
+    """Merge generated OAuth parameters into an endpoint's existing query."""
+    endpoint = urlparse(endpoint_url)
+    existing = [(key, value) for key, value in parse_qsl(endpoint.query, keep_blank_values=True) if key not in params]
+    return endpoint._replace(query=urlencode([*existing, *params.items()])).geturl()
+
+
 def _validate_oauth_endpoint(url: str) -> None:
     from motoro.config import settings
 
@@ -941,13 +959,15 @@ async def begin_oauth_authorization(
     async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
         prm, oauth_metadata, challenge_scope = await _discover_oauth(server_url, client)
         selected_scope = client_metadata.scope or get_client_metadata_scopes(challenge_scope, prm, oauth_metadata)
-        sdk_metadata = OAuthClientMetadata(
-            redirect_uris=[redirect_uri],
-            token_endpoint_auth_method="none",
-            client_name=client_metadata.client_name,
-            scope=selected_scope,
-            client_uri=client_metadata.client_uri,
-            contacts=list(client_metadata.contacts) or None,
+        sdk_metadata = OAuthClientMetadata.model_validate(
+            {
+                "redirect_uris": [redirect_uri],
+                "token_endpoint_auth_method": "none",
+                "client_name": client_metadata.client_name,
+                "scope": selected_scope,
+                "client_uri": client_metadata.client_uri,
+                "contacts": list(client_metadata.contacts) or None,
+            }
         )
         reusable_client = None
         if (
@@ -1013,9 +1033,16 @@ async def begin_oauth_authorization(
         ).scalar_one_or_none()
         if config is None or config.url != server_url or (owner_id is not None and config.owner_id != owner_id):
             raise MCPServerNotFoundError("MCP server changed while OAuth authorization was starting")
+        if (
+            config.transport != MCPTransport.HTTP
+            or config.headers_encrypted is not None
+            or config.stdio_env_encrypted is not None
+        ):
+            raise MCPAuthConfigurationError("MCP server authentication changed while OAuth authorization was starting")
         config.oauth_pending_encrypted = _encrypt_mapping(pending)
         config.oauth_state_hash = digest
         config.oauth_authorization_required = True
+        _bump_config_revision(config)
         await db.commit()
 
     params = {
@@ -1029,7 +1056,7 @@ async def begin_oauth_authorization(
     }
     if sdk_metadata.scope:
         params["scope"] = sdk_metadata.scope
-    authorization_url = f"{oauth_metadata.authorization_endpoint}?{urlencode(params)}"
+    authorization_url = _authorization_url(str(oauth_metadata.authorization_endpoint), params)
     return MCPOAuthAuthorization(
         authorization_url=authorization_url,
         expires_at=datetime.fromtimestamp(expires_at, tz=UTC),
@@ -1050,6 +1077,7 @@ async def complete_oauth_authorization(
     if not code or not state:
         raise MCPOAuthCallbackError("OAuth callback must include code and state")
     digest = state_hash(state)
+    claim_id = secrets.token_urlsafe(32)
     async with _session("complete OAuth claim") as db:
         stmt = select(MCPServerConfig).where(MCPServerConfig.oauth_state_hash == digest)
         if server_id is not None:
@@ -1070,9 +1098,14 @@ async def complete_oauth_authorization(
             raise MCPOAuthStateError("OAuth callback issuer does not match the authorization server")
         if config.url != pending.get("server_url") or str(config.id) != pending.get("server_id"):
             raise MCPOAuthStateError("OAuth callback is not bound to this MCP server")
-        # Claim before network I/O: a callback is single-use even if token
-        # exchange fails, preventing concurrent replay across API processes.
-        config.oauth_pending_encrypted = None
+        # Claim before network I/O: remove the public lookup index, but retain
+        # an encrypted transaction marker for the post-exchange compare-and-set.
+        # A clear, replacement, config edit, or newer OAuth begin changes the
+        # revision and/or marker, so this callback cannot resurrect credentials.
+        pending["claim_id"] = claim_id
+        pending["claimed"] = True
+        expected_revision = config.config_revision
+        config.oauth_pending_encrypted = _encrypt_mapping(pending)
         config.oauth_state_hash = None
         await db.commit()
 
@@ -1124,7 +1157,19 @@ async def complete_oauth_authorization(
         ).scalar_one_or_none()
         if config is None or config.url != pending["server_url"]:
             raise MCPServerNotFoundError("MCP server changed during OAuth token exchange")
+        current_pending = _decrypt_mapping(config.oauth_pending_encrypted)
+        if (
+            config.config_revision != expected_revision
+            or current_pending is None
+            or not states_equal(str(current_pending.get("claim_id") or ""), claim_id)
+            or config.oauth_state_hash is not None
+            or config.headers_encrypted is not None
+            or config.stdio_env_encrypted is not None
+            or config.transport != MCPTransport.HTTP
+        ):
+            raise MCPOAuthStateError("MCP server authentication changed during OAuth token exchange")
         config.oauth_encrypted = _encrypt_mapping(payload)
+        config.oauth_pending_encrypted = None
         config.oauth_authorization_required = False
         _bump_config_revision(config)
         await db.commit()

@@ -81,7 +81,8 @@ async def test_oauth_refresh_persists_rotated_refresh_token_without_leaking_it()
     persisted: list[dict[str, Any]] = []
     requests: list[httpx.Request] = []
 
-    async def refresh(payload: dict[str, Any]) -> dict[str, Any]:
+    async def refresh(payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        assert not force
         requests.append(httpx.Request("POST", "https://auth.example/token"))
         payload["token"] = {
             "access_token": "new-access-secret",
@@ -124,7 +125,8 @@ async def test_oauth_refresh_failure_is_typed_and_marks_reauthorization() -> Non
 
     marked = False
 
-    async def refresh(_payload: dict[str, Any]) -> dict[str, Any]:
+    async def refresh(_payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        assert not force
         raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
 
     async def mark(_payload: dict[str, Any]) -> None:
@@ -146,6 +148,208 @@ async def test_oauth_refresh_failure_is_typed_and_marks_reauthorization() -> Non
             await client.get("https://mcp.example/mcp")
     assert marked
     assert "secret" not in str(raised.value)
+
+
+async def test_unexpected_401_forces_refresh_and_retries_exactly_once() -> None:
+    from motoro.mcp.oauth import PersistentOAuthAuth
+
+    forced: list[bool] = []
+    seen: list[str] = []
+
+    async def refresh(payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        forced.append(force)
+        payload["token"] = {"access_token": "rotated-access", "refresh_token": "rotated-refresh"}
+        payload["expires_at"] = time.time() + 3600
+        return payload
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        authorization = request.headers["Authorization"]
+        seen.append(authorization)
+        return httpx.Response(200 if authorization == "Bearer rotated-access" else 401)
+
+    payload = {
+        "token": {"access_token": "unexpectedly-rejected", "refresh_token": "refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    async with httpx.AsyncClient(
+        auth=PersistentOAuthAuth(payload, refresh), transport=httpx.MockTransport(handler)
+    ) as client:
+        response = await client.get("https://mcp.example/mcp")
+
+    assert response.status_code == 200
+    assert forced == [True]
+    assert seen == ["Bearer unexpectedly-rejected", "Bearer rotated-access"]
+
+
+async def test_unexpected_401_uses_token_rotated_by_another_process() -> None:
+    from motoro.mcp.oauth import PersistentOAuthAuth
+
+    refresh_grants = 0
+    seen: list[str] = []
+
+    async def reload_under_lock(payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        nonlocal refresh_grants
+        assert force
+        # Simulates finding a newer encrypted token after acquiring the DB lock.
+        payload["token"] = {"access_token": "concurrently-rotated", "refresh_token": "new-refresh"}
+        payload["expires_at"] = time.time() + 3600
+        return payload
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal refresh_grants
+        authorization = request.headers["Authorization"]
+        seen.append(authorization)
+        if authorization == "Bearer old-access":
+            return httpx.Response(401)
+        assert refresh_grants == 0
+        return httpx.Response(200)
+
+    payload = {
+        "token": {"access_token": "old-access", "refresh_token": "old-refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    async with httpx.AsyncClient(
+        auth=PersistentOAuthAuth(payload, reload_under_lock), transport=httpx.MockTransport(handler)
+    ) as client:
+        response = await client.get("https://mcp.example/mcp")
+
+    assert response.status_code == 200
+    assert seen == ["Bearer old-access", "Bearer concurrently-rotated"]
+    assert refresh_grants == 0
+
+
+async def test_unexpected_401_terminal_failure_has_no_retry_loop() -> None:
+    from motoro.mcp.oauth import MCPReauthorizationRequiredError, PersistentOAuthAuth
+
+    requests = 0
+    marked = 0
+
+    async def refresh(payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        assert force
+        payload["token"] = {"access_token": "still-rejected", "refresh_token": "refresh"}
+        payload["expires_at"] = time.time() + 3600
+        return payload
+
+    async def mark(_payload: dict[str, Any]) -> None:
+        nonlocal marked
+        marked += 1
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(401)
+
+    payload = {
+        "token": {"access_token": "first-rejected", "refresh_token": "refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    with pytest.raises(MCPReauthorizationRequiredError):
+        async with httpx.AsyncClient(
+            auth=PersistentOAuthAuth(payload, refresh, mark), transport=httpx.MockTransport(handler)
+        ) as client:
+            await client.get("https://mcp.example/mcp")
+
+    assert requests == 2
+    assert marked == 1
+
+
+async def test_unexpected_401_refresh_failure_marks_reauthorization_without_retry() -> None:
+    from motoro.mcp.oauth import MCPReauthorizationRequiredError, PersistentOAuthAuth
+
+    requests = 0
+    marked = 0
+
+    async def refresh(_payload: dict[str, Any], force: bool) -> dict[str, Any]:
+        assert force
+        raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
+
+    async def mark(_payload: dict[str, Any]) -> None:
+        nonlocal marked
+        marked += 1
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(401)
+
+    payload = {
+        "token": {"access_token": "rejected", "refresh_token": "refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    with pytest.raises(MCPReauthorizationRequiredError):
+        async with httpx.AsyncClient(
+            auth=PersistentOAuthAuth(payload, refresh, mark), transport=httpx.MockTransport(handler)
+        ) as client:
+            await client.get("https://mcp.example/mcp")
+
+    assert requests == 1
+    assert marked == 1
+
+
+async def test_insufficient_scope_requires_interaction_without_refresh() -> None:
+    from motoro.mcp.oauth import MCPReauthorizationRequiredError, PersistentOAuthAuth
+
+    refreshes = 0
+    marked = 0
+
+    async def refresh(payload: dict[str, Any], _force: bool) -> dict[str, Any]:
+        nonlocal refreshes
+        refreshes += 1
+        return payload
+
+    async def mark(_payload: dict[str, Any]) -> None:
+        nonlocal marked
+        marked += 1
+
+    payload = {
+        "token": {"access_token": "valid", "refresh_token": "refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    with pytest.raises(MCPReauthorizationRequiredError):
+        async with httpx.AsyncClient(
+            auth=PersistentOAuthAuth(payload, refresh, mark),
+            transport=httpx.MockTransport(
+                lambda _request: httpx.Response(
+                    403,
+                    headers={"WWW-Authenticate": 'Bearer error="insufficient_scope"'},
+                )
+            ),
+        ) as client:
+            await client.get("https://mcp.example/mcp")
+
+    assert refreshes == 0
+    assert marked == 1
+
+
+def test_authorization_url_preserves_existing_endpoint_query() -> None:
+    from urllib.parse import parse_qs, urlparse
+
+    from motoro.services.mcp_service import _authorization_url
+
+    result = _authorization_url(
+        "https://issuer.example/authorize?tenant=example",
+        {"client_id": "client", "state": "random-state"},
+    )
+    parsed = urlparse(result)
+    assert parsed.path == "/authorize"
+    assert parse_qs(parsed.query) == {
+        "tenant": ["example"],
+        "client_id": ["client"],
+        "state": ["random-state"],
+    }
+
+
+def test_mcp_client_seventh_positional_argument_remains_tools_changed_callback() -> None:
+    from motoro.mcp.client import MCPClient, TransportType
+
+    async def on_tools_changed(_client: MCPClient) -> None:
+        return None
+
+    client = MCPClient("legacy", TransportType.STDIO, "python server.py", None, None, None, on_tools_changed)
+
+    assert client._on_tools_changed is on_tools_changed
+    assert client._http_auth is None
+    assert client._before_tool_call is None
 
 
 def test_model_and_migration_shape_hide_and_persist_authentication() -> None:

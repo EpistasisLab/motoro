@@ -169,9 +169,9 @@ class MCPClient:
         url: str | None = None,
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
+        on_tools_changed: Callable[[MCPClient], Awaitable[None]] | None = None,
         http_auth: httpx.Auth | None = None,
         before_tool_call: BeforeToolCall | None = None,
-        on_tools_changed: Callable[[MCPClient], Awaitable[None]] | None = None,
     ) -> None:
         self.name = name
         self._transport = transport

@@ -952,6 +952,235 @@ async def test_simultaneous_oauth_refresh_is_serialized_across_sessions(
 
 
 @needs_db
+async def test_forced_refresh_reuses_token_rotated_by_another_process(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from motoro.models.database import system_session
+    from motoro.models.mcp_server import MCPServerConfig, MCPServerStatus, MCPTransport
+    from motoro.services import mcp_service
+
+    server_id = uuid.uuid4()
+    server_url = "https://mcp.example/mcp"
+    issuer = "https://auth.example/"
+    observed = {
+        "server_id": str(server_id),
+        "server_url": server_url,
+        "issuer": issuer,
+        "resource": server_url,
+        "oauth_metadata": {"token_endpoint": "https://auth.example/token"},
+        "client_info": {"client_id": "client", "token_endpoint_auth_method": "none"},
+        "token": {"access_token": "rejected-access", "refresh_token": "old-refresh"},
+        "expires_at": time.time() + 3600,
+    }
+    rotated = {
+        **observed,
+        "token": {"access_token": "other-process-access", "refresh_token": "other-process-refresh"},
+    }
+    async with system_session(reason="test: seed already-rotated OAuth token") as db:
+        db.add(
+            MCPServerConfig(
+                id=server_id,
+                name=f"oauth-rotated-{uuid.uuid4().hex[:8]}",
+                transport=MCPTransport.HTTP,
+                url=server_url,
+                status=MCPServerStatus.DISCONNECTED,
+                oauth_encrypted=mcp_service._encrypt_mapping(rotated),
+                config_revision=2,
+            )
+        )
+        await db.commit()
+
+    class UnexpectedHTTPClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("an already-rotated token must not trigger another refresh grant")
+
+    monkeypatch.setattr(mcp_service.httpx, "AsyncClient", UnexpectedHTTPClient)
+    result = await mcp_service._refresh_oauth_under_lock(
+        server_id,
+        issuer,
+        server_url,
+        observed,
+        force=True,
+    )
+
+    assert result["token"]["access_token"] == "other-process-access"
+    assert result["token"]["refresh_token"] == "other-process-refresh"
+
+
+async def _run_oauth_callback_supersession(
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    """Pause a code exchange while a second PostgreSQL session changes auth."""
+    import httpx
+    from sqlalchemy import select
+
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.models.database import system_session
+    from motoro.models.mcp_server import MCPServerConfig, MCPServerStatus, MCPTransport
+    from motoro.services import mcp_service
+
+    server_id = uuid.uuid4()
+    server_url = "https://mcp.example/mcp"
+    issuer = "https://issuer.example/"
+    state = f"state-{uuid.uuid4().hex}"
+    pending = {
+        "server_id": str(server_id),
+        "server_url": server_url,
+        "issuer": issuer,
+        "resource": server_url,
+        "redirect_uri": "https://product.example/oauth/callback",
+        "state": state,
+        "code_verifier": "v" * 64,
+        "expires_at": time.time() + 600,
+        "protected_resource_metadata": {
+            "resource": server_url,
+            "authorization_servers": [issuer],
+        },
+        "oauth_metadata": {
+            "issuer": issuer,
+            "authorization_endpoint": f"{issuer}authorize",
+            "token_endpoint": f"{issuer}token",
+        },
+        "client_info": {
+            "client_id": "client",
+            "redirect_uris": ["https://product.example/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+        },
+        "client_metadata": {
+            "redirect_uris": ["https://product.example/oauth/callback"],
+            "token_endpoint_auth_method": "none",
+        },
+        "client_metadata_url": None,
+    }
+    async with system_session(reason="test: seed OAuth callback race") as db:
+        db.add(
+            MCPServerConfig(
+                id=server_id,
+                name=f"oauth-callback-{uuid.uuid4().hex[:8]}",
+                transport=MCPTransport.HTTP,
+                url=server_url,
+                status=MCPServerStatus.DISCONNECTED,
+                oauth_pending_encrypted=mcp_service._encrypt_mapping(pending),
+                oauth_state_hash=mcp_service.state_hash(state),
+                oauth_authorization_required=True,
+                config_revision=1,
+            )
+        )
+        await db.commit()
+
+    exchange_started = asyncio.Event()
+    release_exchange = asyncio.Event()
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def post(self, _url: str, **_kwargs: Any) -> httpx.Response:
+            exchange_started.set()
+            await release_exchange.wait()
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "stale-access-secret",
+                    "refresh_token": "stale-refresh-secret",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+
+    monkeypatch.setattr(mcp_service.httpx, "AsyncClient", FakeAsyncClient)
+    callback = asyncio.create_task(
+        mcp_service.complete_oauth_authorization(
+            code="authorization-code",
+            state=state,
+            server_id=server_id,
+            registry=MCPServerRegistry(),
+        )
+    )
+    await asyncio.wait_for(exchange_started.wait(), timeout=5)
+
+    replacement_state: str | None = None
+    if mutation == "clear":
+        await mcp_service.clear_oauth_credentials(server_id, registry=MCPServerRegistry())
+    elif mutation == "static":
+
+        class FakeRegistry:
+            async def register(self, **_kwargs: Any) -> Any:
+                client = type("Client", (), {"connected": False})()
+                return type(
+                    "Entry",
+                    (),
+                    {"client": client, "error": None, "reauthorization_required": False},
+                )()
+
+        monkeypatch.setattr(mcp_service, "_validate_registration", lambda *_args: None)
+        await mcp_service.update_server(
+            server_id,
+            headers={"Authorization": "Bearer replacement-secret"},
+            registry=FakeRegistry(),  # type: ignore[arg-type]
+        )
+    elif mutation == "newer":
+        replacement_state = f"new-state-{uuid.uuid4().hex}"
+        newer = {**pending, "state": replacement_state, "code_verifier": "n" * 64}
+        async with system_session(reason="test: supersede OAuth callback") as db:
+            row = (
+                await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+            ).scalar_one()
+            row.oauth_pending_encrypted = mcp_service._encrypt_mapping(newer)
+            row.oauth_state_hash = mcp_service.state_hash(replacement_state)
+            row.config_revision += 1
+            await db.commit()
+    else:  # pragma: no cover - helper contract
+        raise AssertionError(f"unknown mutation: {mutation}")
+
+    release_exchange.set()
+    with pytest.raises(mcp_service.MCPOAuthStateError, match="authentication changed"):
+        await asyncio.wait_for(callback, timeout=5)
+
+    async with system_session(reason="test: verify stale callback rejected") as db:
+        row = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one()
+        assert row.oauth_encrypted is None
+        if mutation == "clear":
+            assert row.oauth_pending_encrypted is None
+            assert row.headers_encrypted is None
+        elif mutation == "static":
+            assert row.oauth_pending_encrypted is None
+            assert row.headers_encrypted is not None
+            assert "replacement-secret" not in row.headers_encrypted
+        else:
+            assert row.oauth_state_hash == mcp_service.state_hash(str(replacement_state))
+            assert mcp_service._decrypt_mapping(row.oauth_pending_encrypted)["state"] == replacement_state
+
+
+@needs_db
+async def test_oauth_callback_cannot_resurrect_credentials_after_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _run_oauth_callback_supersession(monkeypatch, "clear")
+
+
+@needs_db
+async def test_oauth_callback_cannot_override_static_replacement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _run_oauth_callback_supersession(monkeypatch, "static")
+
+
+@needs_db
+async def test_newer_oauth_transaction_supersedes_in_flight_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await _run_oauth_callback_supersession(monkeypatch, "newer")
+
+
+@needs_db
 async def test_call_server_tool_invokes_and_returns_content() -> None:
     from motoro.mcp.registry import MCPServerRegistry
     from motoro.services.mcp_service import call_server_tool, register_server

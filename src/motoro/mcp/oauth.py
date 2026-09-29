@@ -38,7 +38,7 @@ class MCPReauthorizationRequiredError(RuntimeError):
     """Stored OAuth authorization cannot be refreshed and user interaction is required."""
 
 
-RefreshOAuth = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+RefreshOAuth = Callable[[dict[str, Any], bool], Awaitable[dict[str, Any]]]
 MarkReauthorizationRequired = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -86,7 +86,7 @@ class PersistentOAuthAuth(httpx.Auth):
         async with self._lock:
             if not self._valid():
                 try:
-                    self._payload = await self._refresh(dict(self._payload))
+                    self._payload = await self._refresh(dict(self._payload), False)
                 except MCPReauthorizationRequiredError:
                     if self._mark_reauthorization_required is not None:
                         await self._mark_reauthorization_required(self._payload)
@@ -99,9 +99,29 @@ class PersistentOAuthAuth(httpx.Auth):
             request.headers["Authorization"] = f"Bearer {self._payload['token']['access_token']}"
             response = yield request
             challenge = response.headers.get("WWW-Authenticate", "")
-            if response.status_code == 401 or (
-                response.status_code == 403 and "insufficient_scope" in challenge.lower()
-            ):
+            if response.status_code == 401:
+                token = self._payload.get("token") or {}
+                if token.get("refresh_token"):
+                    await response.aread()
+                    try:
+                        self._payload = await self._refresh(dict(self._payload), True)
+                    except MCPReauthorizationRequiredError:
+                        if self._mark_reauthorization_required is not None:
+                            await self._mark_reauthorization_required(self._payload)
+                        raise
+                    if self._valid():
+                        request.headers["Authorization"] = f"Bearer {self._payload['token']['access_token']}"
+                        retry_response = yield request
+                        retry_challenge = retry_response.headers.get("WWW-Authenticate", "")
+                        retry_rejected = retry_response.status_code == 401 or (
+                            retry_response.status_code == 403 and "insufficient_scope" in retry_challenge.lower()
+                        )
+                        if not retry_rejected:
+                            return
+                if self._mark_reauthorization_required is not None:
+                    await self._mark_reauthorization_required(self._payload)
+                raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
+            if response.status_code == 403 and "insufficient_scope" in challenge.lower():
                 if self._mark_reauthorization_required is not None:
                     await self._mark_reauthorization_required(self._payload)
                 raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
