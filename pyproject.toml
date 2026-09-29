@@ -47,10 +47,10 @@ dependencies = [
     # MCPClient.connect() — which always installs a message_handler, for
     # notifications/tools/list_changed — hangs forever on process exit
     # instead of completing. Verified directly: identical connect/list_tools
-    # call succeeds and returns under 1.27.1 (the version ARES actually locks)
+    # call succeeds and returns under the supported 1.x SDK
     # and hangs indefinitely under 2.0.0. No existing test caught this because
     # none exercised a live server before the MCP persistence layer's tests did.
-    "mcp>=1.27.1,<2.0.0",
+    "mcp>=1.29.0,<2.0.0",
     "httpx>=0.28.1",
     # Fernet, for encrypting registered MCP servers' auth headers at rest
     # (services.encryption). Already installed transitively today; declared
