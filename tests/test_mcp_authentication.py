@@ -184,28 +184,27 @@ async def test_unexpected_401_forces_refresh_and_retries_exactly_once() -> None:
 async def test_unexpected_401_uses_token_rotated_by_another_process() -> None:
     from motoro.mcp.oauth import PersistentOAuthAuth
 
-    refresh_grants = 0
+    reloads = 0
     seen: list[str] = []
 
     async def reload_under_lock(payload: dict[str, Any], force: bool) -> dict[str, Any]:
-        nonlocal refresh_grants
+        nonlocal reloads
         assert force
+        reloads += 1
         # Simulates finding a newer encrypted token after acquiring the DB lock.
-        payload["token"] = {"access_token": "concurrently-rotated", "refresh_token": "new-refresh"}
+        payload["token"] = {"access_token": "concurrently-rotated"}
         payload["expires_at"] = time.time() + 3600
         return payload
 
     async def handler(request: httpx.Request) -> httpx.Response:
-        nonlocal refresh_grants
         authorization = request.headers["Authorization"]
         seen.append(authorization)
         if authorization == "Bearer old-access":
             return httpx.Response(401)
-        assert refresh_grants == 0
         return httpx.Response(200)
 
     payload = {
-        "token": {"access_token": "old-access", "refresh_token": "old-refresh"},
+        "token": {"access_token": "old-access"},
         "expires_at": time.time() + 3600,
     }
     async with httpx.AsyncClient(
@@ -215,7 +214,7 @@ async def test_unexpected_401_uses_token_rotated_by_another_process() -> None:
 
     assert response.status_code == 200
     assert seen == ["Bearer old-access", "Bearer concurrently-rotated"]
-    assert refresh_grants == 0
+    assert reloads == 1
 
 
 async def test_unexpected_401_terminal_failure_has_no_retry_loop() -> None:
@@ -273,7 +272,7 @@ async def test_unexpected_401_refresh_failure_marks_reauthorization_without_retr
         return httpx.Response(401)
 
     payload = {
-        "token": {"access_token": "rejected", "refresh_token": "refresh"},
+        "token": {"access_token": "rejected"},
         "expires_at": time.time() + 3600,
     }
     with pytest.raises(MCPReauthorizationRequiredError):

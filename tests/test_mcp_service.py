@@ -969,12 +969,12 @@ async def test_forced_refresh_reuses_token_rotated_by_another_process(
         "resource": server_url,
         "oauth_metadata": {"token_endpoint": "https://auth.example/token"},
         "client_info": {"client_id": "client", "token_endpoint_auth_method": "none"},
-        "token": {"access_token": "rejected-access", "refresh_token": "old-refresh"},
+        "token": {"access_token": "rejected-access"},
         "expires_at": time.time() + 3600,
     }
     rotated = {
         **observed,
-        "token": {"access_token": "other-process-access", "refresh_token": "other-process-refresh"},
+        "token": {"access_token": "other-process-access"},
     }
     async with system_session(reason="test: seed already-rotated OAuth token") as db:
         db.add(
@@ -1004,7 +1004,64 @@ async def test_forced_refresh_reuses_token_rotated_by_another_process(
     )
 
     assert result["token"]["access_token"] == "other-process-access"
-    assert result["token"]["refresh_token"] == "other-process-refresh"
+    assert "refresh_token" not in result["token"]
+
+
+@needs_db
+async def test_forced_refresh_without_rotation_or_refresh_token_marks_reauthorization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sqlalchemy import select
+
+    from motoro.models.database import system_session
+    from motoro.models.mcp_server import MCPServerConfig, MCPServerStatus, MCPTransport
+    from motoro.services import mcp_service
+
+    server_id = uuid.uuid4()
+    server_url = "https://mcp.example/mcp"
+    issuer = "https://auth.example/"
+    payload = {
+        "server_id": str(server_id),
+        "server_url": server_url,
+        "issuer": issuer,
+        "resource": server_url,
+        "oauth_metadata": {"token_endpoint": "https://auth.example/token"},
+        "client_info": {"client_id": "client", "token_endpoint_auth_method": "none"},
+        "token": {"access_token": "rejected-access"},
+        "expires_at": time.time() + 3600,
+    }
+    async with system_session(reason="test: seed unrefreshable OAuth token") as db:
+        db.add(
+            MCPServerConfig(
+                id=server_id,
+                name=f"oauth-unrefreshable-{uuid.uuid4().hex[:8]}",
+                transport=MCPTransport.HTTP,
+                url=server_url,
+                status=MCPServerStatus.DISCONNECTED,
+                oauth_encrypted=mcp_service._encrypt_mapping(payload),
+                config_revision=1,
+            )
+        )
+        await db.commit()
+
+    class UnexpectedHTTPClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            raise AssertionError("a missing refresh token must not issue a refresh grant")
+
+    monkeypatch.setattr(mcp_service.httpx, "AsyncClient", UnexpectedHTTPClient)
+    with pytest.raises(mcp_service.MCPReauthorizationRequiredError):
+        await mcp_service._refresh_oauth_under_lock(
+            server_id,
+            issuer,
+            server_url,
+            payload,
+            force=True,
+        )
+
+    async with system_session(reason="test: verify unrefreshable OAuth marker") as db:
+        row = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one()
+        assert row.oauth_authorization_required is True
+        assert row.config_revision == 2
 
 
 async def _run_oauth_callback_supersession(
