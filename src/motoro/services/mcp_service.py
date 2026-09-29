@@ -750,6 +750,11 @@ async def call_server_tool(
         await (registry or get_registry()).unregister(server_id)
         return None
     reg = registry or get_registry()
+    # Synchronization may replace a live entry whose persisted configuration
+    # changed, but a direct tool call must not resurrect a disconnected server.
+    entry = reg.get(config.id)
+    if entry is None or not entry.client.connected:
+        raise RuntimeError(f"MCP server '{config.name}' is not connected")
     entry = await _synchronize_server(config.id, reg)
     if entry is None or not entry.client.connected:
         raise RuntimeError(f"MCP server '{config.name}' is not connected")

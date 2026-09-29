@@ -204,9 +204,10 @@ async def test_mcp_names_upgrade_to_owner_scoped_uniqueness_and_downgrade_refuse
     finally:
         await engine.dispose()
 
+    revision_before_downgrade = await current_revision(url)
     with pytest.raises(DBAPIError, match="duplicate names exist across owners"):
         await asyncio.to_thread(downgrade, url, "d4b8e2a71c90")
-    assert await current_revision(url) == "8f2c1a6d9b40"
+    assert await current_revision(url) == revision_before_downgrade
 
 
 async def test_chain_owns_only_core_tables() -> None:
