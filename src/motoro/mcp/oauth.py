@@ -12,8 +12,6 @@ from urllib.parse import quote
 
 import anyio
 import httpx
-from mcp.shared.auth import OAuthToken
-from pydantic import ValidationError
 
 
 class MCPAuthenticationError(ValueError):
@@ -40,8 +38,8 @@ class MCPReauthorizationRequiredError(RuntimeError):
     """Stored OAuth authorization cannot be refreshed and user interaction is required."""
 
 
-PersistOAuth = Callable[[dict[str, Any]], Awaitable[None]]
-MarkReauthorizationRequired = Callable[[], Awaitable[None]]
+RefreshOAuth = Callable[[dict[str, Any]], Awaitable[dict[str, Any]]]
+MarkReauthorizationRequired = Callable[[dict[str, Any]], Awaitable[None]]
 
 
 def prepare_token_auth(data: dict[str, str], client_info: dict[str, Any]) -> tuple[dict[str, str], dict[str, str]]:
@@ -68,11 +66,11 @@ class PersistentOAuthAuth(httpx.Auth):
     def __init__(
         self,
         payload: dict[str, Any],
-        persist: PersistOAuth,
+        refresh: RefreshOAuth,
         mark_reauthorization_required: MarkReauthorizationRequired | None = None,
     ) -> None:
         self._payload = payload
-        self._persist = persist
+        self._refresh = refresh
         self._mark_reauthorization_required = mark_reauthorization_required
         self._lock = anyio.Lock()
 
@@ -84,62 +82,19 @@ class PersistentOAuthAuth(httpx.Auth):
         expiry = self._payload.get("expires_at")
         return bool(token.get("access_token") and (expiry is None or time.time() < float(expiry) - 30))
 
-    def _refresh_request(self) -> httpx.Request:
-        token = self._payload.get("token") or {}
-        client = self._payload.get("client_info") or {}
-        metadata = self._payload.get("oauth_metadata") or {}
-        refresh_token = token.get("refresh_token")
-        if not refresh_token or not client.get("client_id") or not metadata.get("token_endpoint"):
-            raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
-        client_secret_expiry = int(client.get("client_secret_expires_at") or 0)
-        if client_secret_expiry and time.time() >= client_secret_expiry:
-            raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
-        data = {
-            "grant_type": "refresh_token",
-            "refresh_token": str(refresh_token),
-            "client_id": str(client["client_id"]),
-            "resource": str(self._payload["resource"]),
-        }
-        data, headers = prepare_token_auth(data, client)
-        return httpx.Request("POST", str(metadata["token_endpoint"]), data=data, headers=headers)
-
     async def async_auth_flow(self, request: httpx.Request) -> AsyncGenerator[httpx.Request, httpx.Response]:
         async with self._lock:
             if not self._valid():
                 try:
-                    refresh_request = self._refresh_request()
+                    self._payload = await self._refresh(dict(self._payload))
                 except MCPReauthorizationRequiredError:
                     if self._mark_reauthorization_required is not None:
-                        await self._mark_reauthorization_required()
+                        await self._mark_reauthorization_required(self._payload)
                     raise
-                try:
-                    refresh_response = yield refresh_request
-                except httpx.HTTPError:
+                if not self._valid():
                     if self._mark_reauthorization_required is not None:
-                        await self._mark_reauthorization_required()
-                    raise MCPReauthorizationRequiredError("MCP OAuth authorization is required") from None
-                if refresh_response.status_code != 200:
-                    if self._mark_reauthorization_required is not None:
-                        await self._mark_reauthorization_required()
+                        await self._mark_reauthorization_required(self._payload)
                     raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
-                try:
-                    refreshed = OAuthToken.model_validate_json(await refresh_response.aread())
-                except ValidationError:
-                    if self._mark_reauthorization_required is not None:
-                        await self._mark_reauthorization_required()
-                    raise MCPReauthorizationRequiredError("MCP OAuth authorization is required") from None
-                token_data = refreshed.model_dump(mode="json", exclude_none=True)
-                # RFC 6749 permits refresh responses to omit a replacement refresh
-                # token; retain the old one in that case.
-                if "refresh_token" not in token_data:
-                    token_data["refresh_token"] = self._payload["token"].get("refresh_token")
-                if "scope" not in token_data and self._payload["token"].get("scope") is not None:
-                    token_data["scope"] = self._payload["token"]["scope"]
-                self._payload["token"] = token_data
-                self._payload["expires_at"] = (
-                    time.time() + refreshed.expires_in if refreshed.expires_in is not None else None
-                )
-                await self._persist(self._payload)
 
             request.headers["Authorization"] = f"Bearer {self._payload['token']['access_token']}"
             response = yield request
@@ -148,7 +103,7 @@ class PersistentOAuthAuth(httpx.Auth):
                 response.status_code == 403 and "insufficient_scope" in challenge.lower()
             ):
                 if self._mark_reauthorization_required is not None:
-                    await self._mark_reauthorization_required()
+                    await self._mark_reauthorization_required(self._payload)
                 raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
 
 

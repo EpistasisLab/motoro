@@ -152,6 +152,9 @@ class ToolResult:
     is_error: bool = False
 
 
+BeforeToolCall = Callable[["MCPClient"], Awaitable["MCPClient | None"]]
+
+
 class MCPClient:
     """Wrapper around the MCP Python SDK for connecting to a single server.
 
@@ -167,6 +170,7 @@ class MCPClient:
         headers: dict[str, str] | None = None,
         server_env: dict[str, str] | None = None,
         http_auth: httpx.Auth | None = None,
+        before_tool_call: BeforeToolCall | None = None,
         on_tools_changed: Callable[[MCPClient], Awaitable[None]] | None = None,
     ) -> None:
         self.name = name
@@ -176,6 +180,7 @@ class MCPClient:
         self._headers = headers or {}
         self._server_env = server_env
         self._http_auth = http_auth
+        self._before_tool_call = before_tool_call
         self._tools: list[ToolInfo] = []
         # The server's own ``instructions`` from the initialize handshake --
         # its description of itself, as distinct from any per-tool
@@ -640,6 +645,14 @@ class MCPClient:
         and retries the call (Issue #719). Validation, timeout, and tool-level
         errors are not retried.
         """
+        if self._before_tool_call is not None:
+            current = await self._before_tool_call(self)
+            if current is None:
+                raise RuntimeError(f"MCP server registration for '{self.name}' no longer exists")
+            if current is not self:
+                if not current.connected:
+                    raise RuntimeError(f"MCPClient '{current.name}' is not connected")
+                return await current.call_tool(tool_name, arguments, meta=meta)
         if not self._session or not self._connected:
             raise RuntimeError(f"MCPClient '{self.name}' is not connected")
 

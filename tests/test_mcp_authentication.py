@@ -81,21 +81,18 @@ async def test_oauth_refresh_persists_rotated_refresh_token_without_leaking_it()
     persisted: list[dict[str, Any]] = []
     requests: list[httpx.Request] = []
 
-    async def persist(payload: dict[str, Any]) -> None:
+    async def refresh(payload: dict[str, Any]) -> dict[str, Any]:
+        requests.append(httpx.Request("POST", "https://auth.example/token"))
+        payload["token"] = {
+            "access_token": "new-access-secret",
+            "refresh_token": "rotated-refresh-secret",
+        }
+        payload["expires_at"] = time.time() + 3600
         persisted.append(json.loads(json.dumps(payload)))
+        return payload
 
     async def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
-        if str(request.url) == "https://auth.example/token":
-            return httpx.Response(
-                200,
-                json={
-                    "access_token": "new-access-secret",
-                    "refresh_token": "rotated-refresh-secret",
-                    "token_type": "Bearer",
-                    "expires_in": 3600,
-                },
-            )
         assert request.headers["Authorization"] == "Bearer new-access-secret"
         return httpx.Response(200, json={"ok": True})
 
@@ -108,7 +105,7 @@ async def test_oauth_refresh_persists_rotated_refresh_token_without_leaking_it()
         "token": {"access_token": "old-access-secret", "refresh_token": "old-refresh-secret"},
         "expires_at": time.time() - 1,
     }
-    auth = PersistentOAuthAuth(payload, persist)
+    auth = PersistentOAuthAuth(payload, refresh)
     async with httpx.AsyncClient(auth=auth, transport=httpx.MockTransport(handler)) as client:
         response = await client.get("https://mcp.example/mcp")
 
@@ -127,15 +124,12 @@ async def test_oauth_refresh_failure_is_typed_and_marks_reauthorization() -> Non
 
     marked = False
 
-    async def persist(_payload: dict[str, Any]) -> None:
-        raise AssertionError("failed refresh must not persist")
+    async def refresh(_payload: dict[str, Any]) -> dict[str, Any]:
+        raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
 
-    async def mark() -> None:
+    async def mark(_payload: dict[str, Any]) -> None:
         nonlocal marked
         marked = True
-
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(400, json={"error": "invalid_grant", "secret": "must-not-surface"})
 
     payload = {
         "resource": "https://mcp.example/mcp",
@@ -144,9 +138,11 @@ async def test_oauth_refresh_failure_is_typed_and_marks_reauthorization() -> Non
         "token": {"access_token": "secret", "refresh_token": "refresh-secret"},
         "expires_at": 0,
     }
-    auth = PersistentOAuthAuth(payload, persist, mark)
+    auth = PersistentOAuthAuth(payload, refresh, mark)
     with pytest.raises(MCPReauthorizationRequiredError) as raised:
-        async with httpx.AsyncClient(auth=auth, transport=httpx.MockTransport(handler)) as client:
+        async with httpx.AsyncClient(
+            auth=auth, transport=httpx.MockTransport(lambda _request: httpx.Response(200))
+        ) as client:
             await client.get("https://mcp.example/mcp")
     assert marked
     assert "secret" not in str(raised.value)
@@ -167,13 +163,20 @@ def test_model_and_migration_shape_hide_and_persist_authentication() -> None:
         "oauth_pending_encrypted",
         "oauth_state_hash",
         "oauth_authorization_required",
+        "config_revision",
     } <= columns
     migration = Path(__file__).parents[1] / "src/motoro/migrations/versions/2e6f4c8a91d3_mcp_authentication.py"
     source = migration.read_text()
     assert 'revision: str = "2e6f4c8a91d3"' in source
     assert 'down_revision: str | None = "8f2c1a6d9b40"' in source
+    revision_migration = (
+        Path(__file__).parents[1] / "src/motoro/migrations/versions/6a4d9f2c7e10_mcp_config_revision.py"
+    )
+    revision_source = revision_migration.read_text()
+    assert 'revision: str = "6a4d9f2c7e10"' in revision_source
+    assert 'down_revision: str | None = "2e6f4c8a91d3"' in revision_source
     config = make_config("postgresql+asyncpg://unused:unused@localhost/unused")
-    assert ScriptDirectory.from_config(config).get_heads() == ["2e6f4c8a91d3"]
+    assert ScriptDirectory.from_config(config).get_heads() == ["6a4d9f2c7e10"]
     row = MCPServerConfig(
         id=uuid.uuid4(),
         name="safe",
@@ -250,3 +253,55 @@ def test_oauth_pkce_and_state_are_random_and_state_index_is_one_way() -> None:
     digest = state_hash(state)
     assert len(digest) == 64
     assert state not in digest
+
+
+async def test_registry_replaces_only_when_persisted_revision_advances(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from motoro.mcp.client import MCPClient
+    from motoro.mcp.registry import MCPServerRegistry
+
+    async def connect(client: MCPClient) -> None:
+        client._connected = True
+
+    async def disconnect(client: MCPClient) -> None:
+        client._connected = False
+
+    monkeypatch.setattr(MCPClient, "connect", connect)
+    monkeypatch.setattr(MCPClient, "disconnect", disconnect)
+    registry = MCPServerRegistry()
+    server_id = uuid.uuid4()
+    first = await registry.ensure_registered(
+        server_id=server_id,
+        name="coherent",
+        headers={"Authorization": "Bearer first-secret"},
+        config_revision=1,
+    )
+    unchanged = await registry.ensure_registered(
+        server_id=server_id,
+        name="coherent",
+        headers={"Authorization": "Bearer ignored-same-revision"},
+        config_revision=1,
+    )
+    replaced = await registry.ensure_registered(
+        server_id=server_id,
+        name="coherent",
+        headers={"Authorization": "Bearer replacement-secret"},
+        config_revision=2,
+    )
+    cleared = await registry.ensure_registered(
+        server_id=server_id,
+        name="coherent",
+        headers=None,
+        config_revision=3,
+    )
+
+    assert unchanged is first
+    assert replaced is not first
+    assert not first.client.connected
+    assert not replaced.client.connected
+    assert replaced.config_revision == 2
+    assert replaced.client._headers == {"Authorization": "Bearer replacement-secret"}
+    assert cleared.client.connected
+    assert cleared.client._headers == {}
+    assert cleared.config_revision == 3

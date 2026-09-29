@@ -60,7 +60,7 @@ from mcp.shared.auth_utils import check_resource_allowed, resource_url_from_serv
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
 
-from motoro.mcp.client import TransportType
+from motoro.mcp.client import MCPClient, TransportType
 from motoro.mcp.oauth import (
     MCPAuthConfigurationError,
     MCPAuthenticationError,
@@ -73,7 +73,7 @@ from motoro.mcp.oauth import (
     state_hash,
     states_equal,
 )
-from motoro.mcp.registry import MCPServerRegistry, get_registry
+from motoro.mcp.registry import MCPServerRegistry, ServerEntry, get_registry
 from motoro.models.mcp_server import MCPServerConfig, MCPServerStatus, MCPTransport
 from motoro.security.mcp_command_allowlist import validate_stdio_command
 from motoro.security.mcp_credentials import validate_http_headers, validate_stdio_env
@@ -332,6 +332,7 @@ async def register_server(
         oauth_pending_encrypted=None,
         oauth_state_hash=None,
         oauth_authorization_required=False,
+        config_revision=1,
         capabilities=None,
         status=MCPServerStatus.DISCONNECTED,
         error_message=None,
@@ -350,17 +351,7 @@ async def register_server(
             raise MCPServerNameConflictError(f"MCP server name '{name}' is already in use in this namespace") from exc
 
     reg = registry or get_registry()
-    entry = await reg.register(
-        server_id=config.id,
-        name=name,
-        owner_id=owner_id,
-        is_system=is_system,
-        transport=TransportType(transport),
-        command=command,
-        url=url,
-        headers=headers,
-        server_env=server_env,
-    )
+    entry = await reg.register(**_registry_connection_kwargs(config, reg))
     async with _session("register_server outcome") as db:
         persisted = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == config.id))).scalar_one()
         await _persist_connection_outcome(db, persisted, entry)
@@ -409,7 +400,9 @@ async def list_servers(*, owner_id: uuid.UUID | None = None) -> Sequence[MCPServ
 async def delete_server(server_id: uuid.UUID, *, registry: MCPServerRegistry | None = None) -> bool:
     """Disconnect and remove a server. Returns False if it did not exist."""
     async with _session("delete_server") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None:
             return False
         reg = registry or get_registry()
@@ -439,33 +432,116 @@ async def _persist_connection_outcome(
     await db.refresh(config)
 
 
-async def _persist_refreshed_oauth(
-    server_id: uuid.UUID, expected_issuer: str, expected_url: str, payload: dict[str, Any]
-) -> None:
-    """Persist rotated tokens only if their original server/issuer binding still matches."""
+def _oauth_payload_valid(payload: dict[str, Any]) -> bool:
+    token = payload.get("token") or {}
+    expiry = payload.get("expires_at")
+    return bool(token.get("access_token") and (expiry is None or time.time() < float(expiry) - 30))
+
+
+def _bump_config_revision(config: MCPServerConfig) -> None:
+    config.config_revision += 1
+
+
+async def _refresh_oauth_under_lock(
+    server_id: uuid.UUID,
+    expected_issuer: str,
+    expected_url: str,
+    observed: dict[str, Any],
+) -> dict[str, Any]:
+    """Serialize refresh on the server row and atomically persist token rotation.
+
+    Every process reloads the encrypted payload after acquiring ``FOR UPDATE``.
+    If a waiter observes the token another process just refreshed, it returns
+    that payload without making a second refresh request.
+    """
     if (
-        payload.get("issuer") != expected_issuer
-        or payload.get("server_url") != expected_url
-        or payload.get("server_id") != str(server_id)
+        observed.get("issuer") != expected_issuer
+        or observed.get("server_url") != expected_url
+        or observed.get("server_id") != str(server_id)
     ):
         raise MCPReauthorizationRequiredError("MCP OAuth credential binding changed")
-    async with _session("persist OAuth refresh") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+
+    async with _session("refresh OAuth under row lock") as db:
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None or config.url != expected_url:
             raise MCPReauthorizationRequiredError("MCP OAuth registration is no longer available")
         current = _decrypt_mapping(config.oauth_encrypted)
-        if current is None or current.get("issuer") != expected_issuer:
+        if (
+            current is None
+            or current.get("issuer") != expected_issuer
+            or current.get("server_url") != expected_url
+            or current.get("server_id") != str(server_id)
+        ):
             raise MCPReauthorizationRequiredError("MCP OAuth credential binding changed")
-        config.oauth_encrypted = _encrypt_mapping(payload)
+        if _oauth_payload_valid(current):
+            return current
+
+        token = current.get("token") or {}
+        client_info = current.get("client_info") or {}
+        metadata = current.get("oauth_metadata") or {}
+        refresh_token = token.get("refresh_token")
+        secret_expiry = int(client_info.get("client_secret_expires_at") or 0)
+        if (
+            not refresh_token
+            or not client_info.get("client_id")
+            or not metadata.get("token_endpoint")
+            or (secret_expiry and time.time() >= secret_expiry)
+        ):
+            if not config.oauth_authorization_required:
+                config.oauth_authorization_required = True
+                _bump_config_revision(config)
+            await db.commit()
+            raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
+
+        data = {
+            "grant_type": "refresh_token",
+            "refresh_token": str(refresh_token),
+            "client_id": str(client_info["client_id"]),
+            "resource": str(current["resource"]),
+        }
+        data, headers = prepare_token_auth(data, client_info)
+        try:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+                response = await client.post(str(metadata["token_endpoint"]), data=data, headers=headers)
+            if response.status_code != 200:
+                raise MCPReauthorizationRequiredError("MCP OAuth authorization is required")
+            refreshed = OAuthToken.model_validate_json(response.content)
+        except Exception:
+            if not config.oauth_authorization_required:
+                config.oauth_authorization_required = True
+                _bump_config_revision(config)
+            await db.commit()
+            raise MCPReauthorizationRequiredError("MCP OAuth authorization is required") from None
+
+        token_data = refreshed.model_dump(mode="json", exclude_none=True)
+        if "refresh_token" not in token_data:
+            token_data["refresh_token"] = token.get("refresh_token")
+        if "scope" not in token_data and token.get("scope") is not None:
+            token_data["scope"] = token["scope"]
+        current["token"] = token_data
+        current["expires_at"] = time.time() + refreshed.expires_in if refreshed.expires_in is not None else None
+        config.oauth_encrypted = _encrypt_mapping(current)
         config.oauth_authorization_required = False
+        _bump_config_revision(config)
         await db.commit()
+        return current
 
 
-async def _mark_oauth_reauthorization_required(server_id: uuid.UUID) -> None:
+async def _mark_oauth_reauthorization_required(server_id: uuid.UUID, observed: dict[str, Any]) -> None:
     async with _session("mark OAuth reauthorization required") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
-        if config is not None:
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
+        current = _decrypt_mapping(config.oauth_encrypted) if config is not None else None
+        current_access = (current or {}).get("token", {}).get("access_token")
+        observed_access = observed.get("token", {}).get("access_token")
+        if current_access != observed_access:
+            return
+        if config is not None and not config.oauth_authorization_required:
             config.oauth_authorization_required = True
+            _bump_config_revision(config)
             await db.commit()
 
 
@@ -478,13 +554,46 @@ def _oauth_auth_for(config: MCPServerConfig) -> PersistentOAuthAuth | None:
     issuer = str(payload.get("issuer") or "")
     server_url = config.url
 
-    async def persist(updated: dict[str, Any]) -> None:
-        await _persist_refreshed_oauth(config.id, issuer, server_url, updated)
+    async def refresh(observed: dict[str, Any]) -> dict[str, Any]:
+        return await _refresh_oauth_under_lock(config.id, issuer, server_url, observed)
 
-    async def mark_required() -> None:
-        await _mark_oauth_reauthorization_required(config.id)
+    async def mark_required(observed: dict[str, Any]) -> None:
+        await _mark_oauth_reauthorization_required(config.id, observed)
 
-    return PersistentOAuthAuth(payload, persist, mark_required)
+    return PersistentOAuthAuth(payload, refresh, mark_required)
+
+
+def _registry_connection_kwargs(config: MCPServerConfig, registry: MCPServerRegistry) -> dict[str, Any]:
+    server_id = config.id
+
+    async def before_tool_call(_client: MCPClient) -> MCPClient | None:
+        entry = await _synchronize_server(server_id, registry)
+        return entry.client if entry is not None else None
+
+    return {
+        "server_id": config.id,
+        "name": config.name,
+        "owner_id": config.owner_id,
+        "is_system": config.is_system,
+        "transport": TransportType(config.transport.value),
+        "command": config.command,
+        "url": config.url,
+        "headers": _decrypt_headers(config.headers_encrypted),
+        "server_env": _decrypt_stdio_env(config.stdio_env_encrypted),
+        "http_auth": _oauth_auth_for(config),
+        "config_revision": config.config_revision,
+        "before_tool_call": before_tool_call,
+    }
+
+
+async def _synchronize_server(server_id: uuid.UUID, registry: MCPServerRegistry) -> ServerEntry | None:
+    """Make one live registry entry match its authoritative persisted revision."""
+    async with _session("synchronize MCP registry entry") as db:
+        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+    if config is None:
+        await registry.unregister(server_id)
+        return None
+    return await registry.ensure_registered(**_registry_connection_kwargs(config, registry))
 
 
 async def refresh_server(server_id: uuid.UUID, *, registry: MCPServerRegistry | None = None) -> MCPServerConfig | None:
@@ -509,18 +618,7 @@ async def reconnect_server(
         config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
         if config is None:
             return None
-        entry = await reg.register(
-            server_id=config.id,
-            name=config.name,
-            owner_id=config.owner_id,
-            is_system=config.is_system,
-            transport=TransportType(config.transport.value),
-            command=config.command,
-            url=config.url,
-            headers=_decrypt_headers(config.headers_encrypted),
-            server_env=_decrypt_stdio_env(config.stdio_env_encrypted),
-            http_auth=_oauth_auth_for(config),
-        )
+        entry = await reg.register(**_registry_connection_kwargs(config, reg))
         await _persist_connection_outcome(db, config, entry)
         await db.commit()
         return config
@@ -539,7 +637,9 @@ async def update_server(
 ) -> MCPServerConfig | None:
     """Update a server's config and reconnect it with the new settings."""
     async with _session("update_server") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None:
             return None
 
@@ -602,26 +702,20 @@ async def update_server(
             config.headers_encrypted = _encrypt_headers(headers)
         if not isinstance(server_env, CredentialNotSupplied):
             config.stdio_env_encrypted = _encrypt_stdio_env(server_env)
+        _bump_config_revision(config)
         try:
             await db.flush()
         except IntegrityError as exc:
             raise MCPServerNameConflictError(
                 f"MCP server name '{config.name}' is already in use in this namespace"
             ) from exc
+        # Publish the new revision and release the row lock before connecting.
+        # An OAuth-enabled connect may itself need the same row lock to refresh
+        # an expired token; retaining it here would self-deadlock.
+        await db.commit()
 
         reg = registry or get_registry()
-        entry = await reg.register(
-            server_id=config.id,
-            name=config.name,
-            owner_id=config.owner_id,
-            is_system=config.is_system,
-            transport=TransportType(config.transport.value),
-            command=config.command,
-            url=config.url,
-            headers=_decrypt_headers(config.headers_encrypted),
-            server_env=_decrypt_stdio_env(config.stdio_env_encrypted),
-            http_auth=_oauth_auth_for(config),
-        )
+        entry = await reg.register(**_registry_connection_kwargs(config, reg))
         await _persist_connection_outcome(db, config, entry)
         await db.commit()
         return config
@@ -642,9 +736,10 @@ async def call_server_tool(
     """
     config = await get_server(server_id)
     if config is None:
+        await (registry or get_registry()).unregister(server_id)
         return None
     reg = registry or get_registry()
-    entry = reg.get(config.id)
+    entry = await _synchronize_server(config.id, reg)
     if entry is None or not entry.client.connected:
         raise RuntimeError(f"MCP server '{config.name}' is not connected")
     result = await entry.client.call_tool(tool_name, arguments, meta=meta)
@@ -678,10 +773,10 @@ async def hydrate_registry(*, registry: MCPServerRegistry | None = None) -> list
     persisted a config is pointless — nothing would ever read it back into a
     live connection.
 
-    Returns the names of servers that failed to connect (already logged); a
-    server already connected is left untouched rather than reconnected, so
-    calling this twice in one process is a cheap no-op for anything already
-    hydrated.
+    Returns the names of servers that failed to connect (already logged).
+    Connected entries whose persisted ``config_revision`` changed are replaced,
+    and entries deleted by another process are unregistered. Calling this twice
+    is therefore a cheap no-op only while persisted state is unchanged.
 
     Safe to call concurrently: the already-connected check happens inside the
     registry's lock (``ensure_registered``), not here. It used to be a
@@ -697,20 +792,13 @@ async def hydrate_registry(*, registry: MCPServerRegistry | None = None) -> list
     async with _session("hydrate_registry") as db:
         configs = (await db.execute(select(MCPServerConfig))).scalars().all()
 
+    persisted_ids = {config.id for config in configs}
+    for stale_id in set(reg.servers) - persisted_ids:
+        await reg.unregister(stale_id)
+
     for config in configs:
         try:
-            entry = await reg.ensure_registered(
-                server_id=config.id,
-                name=config.name,
-                owner_id=config.owner_id,
-                is_system=config.is_system,
-                transport=TransportType(config.transport.value),
-                command=config.command,
-                url=config.url,
-                headers=_decrypt_headers(config.headers_encrypted),
-                server_env=_decrypt_stdio_env(config.stdio_env_encrypted),
-                http_auth=_oauth_auth_for(config),
-            )
+            entry = await reg.ensure_registered(**_registry_connection_kwargs(config, reg))
             if not entry.client.connected:
                 failed.append(config.name)
         except Exception:
@@ -1028,12 +1116,17 @@ async def complete_oauth_authorization(
     }
     async with _session("complete OAuth persist") as db:
         config = (
-            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == uuid.UUID(str(pending["server_id"]))))
+            await db.execute(
+                select(MCPServerConfig)
+                .where(MCPServerConfig.id == uuid.UUID(str(pending["server_id"])))
+                .with_for_update()
+            )
         ).scalar_one_or_none()
         if config is None or config.url != pending["server_url"]:
             raise MCPServerNotFoundError("MCP server changed during OAuth token exchange")
         config.oauth_encrypted = _encrypt_mapping(payload)
         config.oauth_authorization_required = False
+        _bump_config_revision(config)
         await db.commit()
 
     reconnected = await reconnect_server(config.id, registry=registry)
@@ -1058,7 +1151,9 @@ async def clear_oauth_credentials(
     fails.
     """
     async with _session("clear OAuth load") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None or (owner_id is not None and config.owner_id != owner_id):
             raise MCPServerNotFoundError("MCP server was not found")
         payload = _decrypt_mapping(config.oauth_encrypted)
@@ -1091,7 +1186,9 @@ async def clear_oauth_credentials(
                     pass
 
     async with _session("clear OAuth persist") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None or (owner_id is not None and config.owner_id != owner_id):
             raise MCPServerNotFoundError("MCP server was not found")
         config.oauth_encrypted = None
@@ -1100,6 +1197,7 @@ async def clear_oauth_credentials(
         config.oauth_authorization_required = False
         config.status = MCPServerStatus.DISCONNECTED
         config.error_message = None
+        _bump_config_revision(config)
         await db.commit()
     await (registry or get_registry()).unregister(server_id)
     return revoked
@@ -1113,7 +1211,9 @@ async def clear_server_credentials(
 ) -> MCPServerConfig:
     """Clear every supported credential kind without deleting the registration."""
     async with _session("clear all MCP credentials") as db:
-        config = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one_or_none()
+        config = (
+            await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id).with_for_update())
+        ).scalar_one_or_none()
         if config is None or (owner_id is not None and config.owner_id != owner_id):
             raise MCPServerNotFoundError("MCP server was not found")
         config.headers_encrypted = None
@@ -1124,6 +1224,7 @@ async def clear_server_credentials(
         config.oauth_authorization_required = False
         config.status = MCPServerStatus.DISCONNECTED
         config.error_message = None
+        _bump_config_revision(config)
         await db.commit()
         await db.refresh(config)
     await (registry or get_registry()).unregister(server_id)

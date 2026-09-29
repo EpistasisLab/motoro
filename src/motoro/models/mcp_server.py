@@ -19,7 +19,7 @@ import uuid
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Boolean, DateTime, Enum, Index, String, Text, UniqueConstraint, func, text
+from sqlalchemy import BigInteger, Boolean, DateTime, Enum, Index, String, Text, UniqueConstraint, func, text
 from sqlalchemy.dialects.postgresql import JSON, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -100,6 +100,9 @@ class MCPServerConfig(Base):
     oauth_authorization_required: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default="false", default=False
     )
+    # Monotonic connection-material version. Every persisted config/credential
+    # mutation increments it so other processes can replace stale live clients.
+    config_revision: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default="1", default=1)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_system: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false", default=False)
     # Opaque attribution tag — see the module docstring and Agent.owner_id.

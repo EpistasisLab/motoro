@@ -31,6 +31,7 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -705,6 +706,34 @@ async def test_delete_server_unregisters_and_removes_row() -> None:
 
 
 @needs_db
+async def test_hydration_unregisters_rows_deleted_by_another_process() -> None:
+    from motoro.mcp.registry import MCPServerRegistry
+    from motoro.services.mcp_service import delete_server, hydrate_registry, register_server
+
+    writer = MCPServerRegistry()
+    worker = MCPServerRegistry()
+    config = await _with_timeout(
+        register_server(
+            name=f"echo-delete-{uuid.uuid4().hex[:8]}",
+            transport="stdio",
+            command=_ECHO_COMMAND,
+            registry=writer,
+        )
+    )
+    try:
+        assert await _with_timeout(hydrate_registry(registry=worker)) == []
+        worker_client = worker.get(config.id).client
+        assert worker_client.connected
+        assert await delete_server(config.id, registry=writer)
+        assert await _with_timeout(hydrate_registry(registry=worker)) == []
+        assert worker.get(config.id) is None
+        assert not worker_client.connected
+    finally:
+        await worker.disconnect_all()
+        await writer.disconnect_all()
+
+
+@needs_db
 async def test_refresh_server_rediscovers_tools() -> None:
     from motoro.mcp.registry import MCPServerRegistry
     from motoro.services.mcp_service import refresh_server, register_server
@@ -793,6 +822,7 @@ async def test_stdio_credentials_are_encrypted_replaced_cleared_and_hydrated() -
             registry=original,
         )
     )
+    fresh = MCPServerRegistry()
     try:
         assert config.stdio_env_encrypted is not None
         assert first_secret not in config.stdio_env_encrypted
@@ -802,6 +832,9 @@ async def test_stdio_credentials_are_encrypted_replaced_cleared_and_hydrated() -
         status = await get_authentication_status(config.id)
         assert status.auth_mode == "stdio_env"
         assert status.stdio_env_names == ("PRODUCT_API_TOKEN",)
+        assert await _with_timeout(hydrate_registry(registry=fresh)) == []
+        first_fresh_client = fresh.get(config.id).client
+        first_revision = fresh.get(config.id).config_revision
 
         replacement = "replacement-stdio-secret"
         replaced = await _with_timeout(
@@ -813,21 +846,109 @@ async def test_stdio_credentials_are_encrypted_replaced_cleared_and_hydrated() -
         )
         assert replacement not in replaced.stdio_env_encrypted
         assert first_secret not in replaced.stdio_env_encrypted
-
-        fresh = MCPServerRegistry()
-        try:
-            assert await _with_timeout(hydrate_registry(registry=fresh)) == []
-            assert await call_server_tool(
-                config.id, "environment_has", {"name": "REPLACEMENT_TOKEN"}, registry=fresh
-            ) == (False, "true")
-        finally:
-            await fresh.disconnect_all()
+        assert replaced.config_revision > first_revision
+        assert await _with_timeout(hydrate_registry(registry=fresh)) == []
+        replacement_client = fresh.get(config.id).client
+        assert replacement_client is not first_fresh_client
+        assert await call_server_tool(config.id, "environment_has", {"name": "REPLACEMENT_TOKEN"}, registry=fresh) == (
+            False,
+            "true",
+        )
 
         cleared = await _with_timeout(update_server(config.id, server_env=None, registry=original))
         assert cleared.stdio_env_encrypted is None
         assert (await get_authentication_status(config.id)).auth_mode == "none"
+        assert await call_server_tool(config.id, "environment_has", {"name": "REPLACEMENT_TOKEN"}, registry=fresh) == (
+            False,
+            "false",
+        )
+        assert fresh.get(config.id).client is not replacement_client
+        assert fresh.get(config.id).config_revision == cleared.config_revision
     finally:
+        await fresh.disconnect_all()
         await original.disconnect_all()
+
+
+@needs_db
+async def test_simultaneous_oauth_refresh_is_serialized_across_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import httpx
+    from sqlalchemy import select
+
+    from motoro.models.database import system_session
+    from motoro.models.mcp_server import MCPServerConfig, MCPServerStatus, MCPTransport
+    from motoro.services import mcp_service
+
+    server_id = uuid.uuid4()
+    server_url = "https://mcp.example/mcp"
+    issuer = "https://auth.example/"
+    old_refresh = "old-refresh-secret"
+    payload = {
+        "server_id": str(server_id),
+        "server_url": server_url,
+        "issuer": issuer,
+        "resource": server_url,
+        "oauth_metadata": {"token_endpoint": "https://auth.example/token"},
+        "client_info": {"client_id": "client", "token_endpoint_auth_method": "none"},
+        "token": {"access_token": "expired-access", "refresh_token": old_refresh},
+        "expires_at": time.time() - 60,
+    }
+    async with system_session(reason="test: seed simultaneous OAuth refresh") as db:
+        db.add(
+            MCPServerConfig(
+                id=server_id,
+                name=f"oauth-{uuid.uuid4().hex[:8]}",
+                transport=MCPTransport.HTTP,
+                url=server_url,
+                status=MCPServerStatus.DISCONNECTED,
+                oauth_encrypted=mcp_service._encrypt_mapping(payload),
+                config_revision=1,
+            )
+        )
+        await db.commit()
+
+    refresh_requests = 0
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs: Any) -> None:
+            pass
+
+        async def __aenter__(self) -> FakeAsyncClient:
+            return self
+
+        async def __aexit__(self, *_args: Any) -> None:
+            return None
+
+        async def post(self, _url: str, **_kwargs: Any) -> httpx.Response:
+            nonlocal refresh_requests
+            refresh_requests += 1
+            await asyncio.sleep(0.05)
+            return httpx.Response(
+                200,
+                json={
+                    "access_token": "rotated-access-secret",
+                    "refresh_token": "rotated-refresh-secret",
+                    "token_type": "Bearer",
+                    "expires_in": 3600,
+                },
+            )
+
+    monkeypatch.setattr(mcp_service.httpx, "AsyncClient", FakeAsyncClient)
+    first, second = await asyncio.gather(
+        mcp_service._refresh_oauth_under_lock(server_id, issuer, server_url, dict(payload)),
+        mcp_service._refresh_oauth_under_lock(server_id, issuer, server_url, dict(payload)),
+    )
+
+    assert refresh_requests == 1
+    assert first["token"]["refresh_token"] == "rotated-refresh-secret"
+    assert second["token"]["refresh_token"] == "rotated-refresh-secret"
+    async with system_session(reason="test: verify simultaneous OAuth refresh") as db:
+        row = (await db.execute(select(MCPServerConfig).where(MCPServerConfig.id == server_id))).scalar_one()
+        stored = mcp_service._decrypt_mapping(row.oauth_encrypted)
+        assert stored["token"]["refresh_token"] == "rotated-refresh-secret"
+        assert old_refresh not in row.oauth_encrypted
+        assert row.config_revision == 2
 
 
 @needs_db
