@@ -252,12 +252,65 @@ set_credential_resolver(my_resolver)   # e.g. ASAREE reads a per-user settings t
 
 ### Model capabilities
 
-Not every model accepts `temperature`. Adaptive-thinking models (Opus 4.7/4.8,
-Sonnet 5, Fable 5) 400 on an explicit `temperature` and are steered instead
-with an `effort` dial (`low | medium | high | xhigh | max`). `model_config`
-doesn't need to know which regime a model is in — the LLM bridge resolves it
-per call via `motoro.services.model_capabilities`, the single source of
-truth other products (and their own GUI/SDK) resolve against too.
+Unknown models default to effort-only capabilities and send
+`reasoning_effort="medium"` without `temperature`. Known entries keep their
+existing controls and supported effort levels, including temperature-only
+GPT-4o, GPT-4o Mini, GPT-5 Chat, and Claude Haiku 4.5.
+
+ASAREE should validate its live capability metadata with
+`motoro.services.model_capabilities.ModelCapabilities.model_validate()` and
+populate `ModelConfig.resolved_capabilities` (or the same field on
+`PartialModelConfig` at its agent/API boundary). Use that validated object
+to render the UI and carry it into execution:
+
+```python
+from motoro.schemas.agent import ModelConfig
+from motoro.services.llm_service import LLMService
+from motoro.services.model_capabilities import ModelCapabilities, get_capabilities
+
+# live_metadata is supplied by the product's capability discovery.
+caps = ModelCapabilities.model_validate(live_metadata)
+# Without live discovery: caps = get_capabilities("my-model")
+config = ModelConfig(
+    provider="openai",
+    model="my-model",
+    resolved_capabilities=caps,
+    effort=None,  # effort-only requests use caps.default_effort
+)
+# Render controls from config.resolved_capabilities in ASAREE's UI.
+text, record = await LLMService().complete_text(
+    config, [{"role": "user", "content": "Hello"}]
+)
+```
+
+Resolved capabilities override the registry, including conflicting known
+entries. When absent, execution calls `get_capabilities()` with the effective
+provider model string. The same decision applies to structured completions,
+text completions, native tool calls, tool selection, and their retries.
+The field survives JSON serialization and Motoro's agent/run execution path;
+each `fallback_models` entry carries its own capabilities independently.
+Supply metadata for the effective model, including any deployment mapping,
+and refresh or clear it when changing the model or provider.
+
+Effort-capable metadata must declare nonempty, unique `effort_levels` and a
+`default_effort` from that list. Levels may be provider-specific strings.
+An explicit `effort` is checked at request construction; an unsupported value
+raises `UnsupportedEffortError` (a `ValueError`) before sending a request,
+without retrying or switching to a fallback. Temperature-only models reject
+configured effort too. Models supporting both controls retain temperature-first
+behavior. Models supporting neither send neither control.
+
+For custom temperature-only models, pass
+`resolved_capabilities=TEMPERATURE_ONLY_CAPABILITIES`, imported from
+`motoro.services.model_capabilities`, or equivalent metadata:
+
+```python
+{"supports_temperature": True, "supports_effort": False,
+ "effort_levels": [], "default_effort": None}
+```
+
+The `temperature=0.7` schema default remains available for temperature-capable
+models; effort-only requests omit it entirely.
 
 ### Timeouts
 

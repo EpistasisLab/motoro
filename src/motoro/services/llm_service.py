@@ -169,20 +169,27 @@ def _build_model_string(config: ModelConfig) -> str:
     return f"{prefix}/{config.model}"
 
 
+class UnsupportedEffortError(ValueError):
+    """Configured effort is incompatible with the effective model's capabilities."""
+
+
 def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
     """Per-model sampling controls for the litellm call.
 
-    Temperature-based models get ``temperature``. Adaptive-thinking models that reject
-    temperature (Opus 4.7/4.8, Fable 5) get ``reasoning_effort`` instead — litellm maps
-    it onto Anthropic's ``output_config.effort``. Capabilities are resolved from the
-    single source of truth in ``motoro.services.model_capabilities``. If an effort-based
-    model has no effort configured we send nothing and let the model use its default.
+    Caller-resolved capabilities take precedence over the registry. Effort-only
+    models always receive configured effort or the resolved default, never temperature.
+    Models accepting both controls retain the existing temperature-first behavior.
     """
-    caps = get_capabilities(model_str)
+    caps = config.resolved_capabilities or get_capabilities(model_str)
+    if config.effort is not None and (not caps.supports_effort or config.effort not in caps.effort_levels):
+        raise UnsupportedEffortError(
+            f"Unsupported effort {config.effort!r} for model {model_str!r}; "
+            f"supported levels: {caps.effort_levels}"
+        )
     if caps.supports_temperature:
         return {"temperature": config.temperature}
-    if caps.supports_effort and config.effort:
-        return {"reasoning_effort": config.effort}
+    if caps.supports_effort:
+        return {"reasoning_effort": config.effort if config.effort is not None else caps.default_effort}
     return {}
 
 
@@ -445,8 +452,8 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete(cfg, messages, response_model, max_retries, principal_id)
-                except LLMBudgetExceededError:
-                    # Budget exhausted — do not try fallback models.
+                except (LLMBudgetExceededError, UnsupportedEffortError):
+                    # Budget exhaustion and invalid sampling config are terminal.
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -642,7 +649,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_with_tools(cfg, messages, tools, principal_id, max_retries)
-                except LLMBudgetExceededError:
+                except (LLMBudgetExceededError, UnsupportedEffortError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -954,7 +961,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_text(cfg, messages, principal_id)
-                except LLMBudgetExceededError:
+                except (LLMBudgetExceededError, UnsupportedEffortError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -1191,6 +1198,7 @@ __all__ = [
     "LLMRateLimitError",
     "LLMBudgetExceededError",
     "BudgetCheck",
+    "UnsupportedEffortError",
 ]
 
 

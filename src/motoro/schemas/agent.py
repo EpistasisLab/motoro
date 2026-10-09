@@ -3,11 +3,12 @@
 import enum
 import uuid
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from motoro.schemas.pattern import PatternConfig
+from motoro.services.model_capabilities import ModelCapabilities
 
 
 class LLMProvider(enum.StrEnum):
@@ -49,13 +50,17 @@ class ModelConfig(BaseModel):
     provider: LLMProvider = LLMProvider.ANTHROPIC
     model: str = "claude-sonnet-5"
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
+    effort: str | None = Field(
         default=None,
+        min_length=1,
         description=(
-            "Reasoning effort for adaptive-thinking models that reject temperature "
-            "(Opus 4.7/4.8, Fable 5). Mapped to Anthropic's output_config.effort. "
-            "Ignored for models that use temperature; see motoro.services.model_capabilities."
+            "Reasoning effort, validated against resolved capabilities at request construction. "
+            "When unset, effort-only models use the resolved default_effort."
         ),
+    )
+    resolved_capabilities: ModelCapabilities | None = Field(
+        default=None,
+        description="Validated caller-resolved metadata for this model; overrides Motoro's registry.",
     )
     max_tokens: int = Field(default=4096, gt=0, le=200000)
     api_base: str | None = Field(default=None, description="Custom API base URL (e.g., Foundry)")
@@ -88,9 +93,14 @@ class PartialModelConfig(BaseModel):
     provider: LLMProvider | None = None
     model: str | None = None
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
-    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = Field(
+    effort: str | None = Field(
         default=None,
+        min_length=1,
         description="Reasoning effort for adaptive-thinking models; see ModelConfig.effort.",
+    )
+    resolved_capabilities: ModelCapabilities | None = Field(
+        default=None,
+        description="Caller-resolved metadata for the effective model; see ModelConfig.resolved_capabilities.",
     )
     max_tokens: int = Field(default=4096, gt=0, le=200000)
     api_base: str | None = Field(default=None, description="Custom API base URL (e.g., Foundry)")

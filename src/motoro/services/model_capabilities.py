@@ -11,9 +11,9 @@ param onto ``output_config.effort`` for these models, so the LLM service sends
 
 This module decides, per model, whether to expose **temperature** or **effort** — and
 which effort levels are valid (``xhigh`` / ``max`` are gated per model by the provider).
-The backend, the SDK, and the GUI all resolve capabilities through here (the GUI/SDK via
-the ``/api/model-capabilities`` endpoint) so the temperature-vs-effort decision is made in
-exactly one place.
+Products can resolve capabilities here or validate live metadata with
+``ModelCapabilities`` and populate ``ModelConfig.resolved_capabilities``. The UI
+and execution then share the same temperature-vs-effort decision.
 
 NOTE: litellm's own ``get_supported_openai_params`` is NOT a reliable oracle here — it
 reports ``temperature`` as supported for ``claude-opus-4-8`` even though the wire call
@@ -22,7 +22,7 @@ reports ``temperature`` as supported for ``claude-opus-4-8`` even though the wir
 
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 # Full Anthropic effort ladder, low -> max. Individual models gate the top rungs
 # (``xhigh`` / ``max``); each registry entry lists only the levels it actually accepts.
@@ -32,6 +32,8 @@ DEFAULT_EFFORT: str = "medium"
 
 class ModelCapabilities(BaseModel):
     """What sampling controls a given model accepts."""
+
+    model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
     supports_temperature: bool = Field(
         default=True,
@@ -44,12 +46,25 @@ class ModelCapabilities(BaseModel):
     )
     effort_levels: list[str] = Field(
         default_factory=list,
-        description="Valid effort levels for this model (subset of EFFORT_LEVELS_FULL).",
+        description="Valid provider-specific effort levels for this model.",
     )
     default_effort: str | None = Field(
         default=None,
         description="Suggested default effort level when effort is the active control.",
     )
+
+    @model_validator(mode="after")
+    def validate_effort_metadata(self) -> ModelCapabilities:
+        if self.supports_effort:
+            if not self.effort_levels or any(not level.strip() for level in self.effort_levels):
+                raise ValueError("Effort-capable models must declare nonempty effort_levels")
+            if len(set(self.effort_levels)) != len(self.effort_levels):
+                raise ValueError("effort_levels must contain unique values")
+            if self.default_effort not in self.effort_levels:
+                raise ValueError("default_effort must be one of effort_levels")
+        elif self.effort_levels or self.default_effort is not None:
+            raise ValueError("Models without effort support cannot declare effort metadata")
+        return self
 
 
 class ModelCatalogEntry(BaseModel):
@@ -70,13 +85,16 @@ _EFFORT_ONLY = ModelCapabilities(
     default_effort=DEFAULT_EFFORT,
 )
 
-# Temperature-based models (the default for anything not listed below).
-DEFAULT_CAPABILITIES = ModelCapabilities(
+# Explicit override for custom temperature-only models and known registry entries.
+TEMPERATURE_ONLY_CAPABILITIES = ModelCapabilities(
     supports_temperature=True,
     supports_effort=False,
     effort_levels=[],
     default_effort=None,
 )
+
+# Unrecognized models use effort rather than sending a potentially rejected temperature.
+DEFAULT_CAPABILITIES = _EFFORT_ONLY
 
 # OpenAI's GPT-5 reasoning family. Effort-based like the Claude entries above, but
 # on a shorter ladder: OpenAI's ``reasoning_effort`` tops out at ``high`` (there is no
@@ -87,9 +105,8 @@ DEFAULT_CAPABILITIES = ModelCapabilities(
 # constraint: unlike adaptive-thinking Claude, a GPT-5 model accepts temperature when
 # ``reasoning_effort`` is ``none``, so the dial is a property of the request mode as much
 # as of the model. Flattening it to effort is the honest default for a reasoning model —
-# and it's load-bearing, because _sampling_kwargs tests supports_temperature FIRST, so
-# leaving these on DEFAULT_CAPABILITIES means reasoning_effort is never sent at all and
-# any experiment factor bound to effort silently varies nothing.
+# and it's load-bearing, because _sampling_kwargs tests supports_temperature FIRST,
+# so temperature-capable entries do not send reasoning_effort.
 _OPENAI_REASONING = ModelCapabilities(
     supports_temperature=False,
     supports_effort=True,
@@ -108,10 +125,13 @@ _REGISTRY: dict[str, ModelCapabilities] = {
     # Ordered BEFORE the "gpt-5" entries: gpt-5-chat is the non-reasoning
     # sibling (temperature, no reasoning_effort), and it contains "gpt-5" as a
     # substring, so the fallback loop below must reach it first.
-    "gpt-5-chat": DEFAULT_CAPABILITIES,
+    "gpt-5-chat": TEMPERATURE_ONLY_CAPABILITIES,
     "gpt-5-mini": _OPENAI_REASONING,
     "gpt-5-nano": _OPENAI_REASONING,
     "gpt-5": _OPENAI_REASONING,
+    "claude-haiku-4-5": TEMPERATURE_ONLY_CAPABILITIES,
+    "gpt-4o-mini": TEMPERATURE_ONLY_CAPABILITIES,
+    "gpt-4o": TEMPERATURE_ONLY_CAPABILITIES,
 }
 
 
@@ -125,7 +145,7 @@ def _normalize(model: str) -> str:
 
 def get_capabilities(model: str) -> ModelCapabilities:
     """Resolve capabilities for a model string. Unknown models default to
-    temperature-based (the safe, backward-compatible choice)."""
+    effort-only with default effort ``medium``. Known entries take precedence."""
     m = _normalize(model)
     if m in _REGISTRY:
         return _REGISTRY[m]
@@ -156,7 +176,7 @@ def _entry(provider: str, model: str, label: str) -> ModelCatalogEntry:
 
 # Curated, selectable models with their capabilities — feeds the GUI's
 # temperature-vs-effort toggle and the SDK. Not exhaustive; arbitrary model strings
-# still resolve via get_capabilities (defaulting to temperature-based).
+# still resolve via get_capabilities (defaulting to effort-only).
 CATALOG: list[ModelCatalogEntry] = [
     _entry("anthropic", "claude-opus-5", "Claude Opus 5"),
     _entry("anthropic", "claude-opus-4-8", "Claude Opus 4.8"),
