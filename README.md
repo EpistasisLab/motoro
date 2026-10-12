@@ -243,6 +243,21 @@ returns a validated `AgentCreate`. Budget and duration remain product-enforced
 settings; the helper exposes their pinned values without requiring a product
 to reread the shared agent.
 
+### Same-named MCP tools
+
+Pass the plain catalog from `registry.get_all_tools()` as `available_tools`.
+When two granted servers expose the same bare name, such as `ping`, Motoro
+derives unique provider function names from `server.tool` and maps calls back
+to the appropriate server. Tools with unique bare names keep those readable
+provider names. Text-based selection uses namespaced names for collisions too;
+planned steps must use the namespaced names shown in the prompt catalog when
+the bare name collides. Plan validation clears ambiguous bare names so Act
+can select an available tool explicitly.
+
+Descriptors must retain `server_id`, `server`, `tool_name` and `name`. Legacy
+descriptors whose `tool_name` was rewritten to `server.tool` are also accepted.
+Dispatch still checks the resolved server and tool against the run's grants.
+
 ```python
 from motoro.runner import fail_run
 
