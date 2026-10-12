@@ -21,6 +21,7 @@ from motoro.models.agent import Agent
 from motoro.models.run import AgentRun
 from motoro.schemas.agent import AgentUpdate, ModelConfig
 from motoro.schemas.output import parse_envelope
+from motoro.schemas.run_config import AgentSnapshotUpdate
 from motoro.services.run_config import effective_agent_config
 
 
@@ -52,10 +53,14 @@ def storage(monkeypatch: pytest.MonkeyPatch) -> Any:
         result.scalar_one_or_none.return_value = row
         return result
 
-    def add(run: AgentRun) -> None:
-        run.id = uuid.uuid4()
-        run.agent = agent
-        runs[run.id] = run
+    def add(row: Agent | AgentRun) -> None:
+        nonlocal agent
+        row.id = uuid.uuid4()
+        if isinstance(row, Agent):
+            agent = row
+        else:
+            row.agent = agent
+            runs[row.id] = row
 
     db.execute = AsyncMock(side_effect=execute)
     db.add.side_effect = add
@@ -171,6 +176,33 @@ async def test_two_pinned_runs_survive_shared_agent_mutation(storage: Any, execu
     assert all(call.kwargs["owner_id"] == agent.owner_id for call in resolver.call_args_list)
 
 
+@pytest.mark.parametrize("snapshot", [None, {}, {"goal": ""}, AgentSnapshotUpdate(goal="")])
+async def test_empty_goal_agent_created_through_runner_executes(
+    storage: Any, execution: Any, snapshot: dict[str, Any] | AgentUpdate | None
+) -> None:
+    agent = await runner.create_agent(name="canvas-agent", goal="")
+    run = await runner.create_run(agent_id=agent.id, user_input="question", config_snapshot=snapshot)
+    result = await runner.execute_run(run_id=run.id, llm_service=MagicMock())
+    assert result.status == "completed"
+    assert execution[0][run.id][0].goal == ""
+    assert run.config_snapshot["goal"] == ""
+
+
+@pytest.mark.parametrize("pinned", [False, True])
+@pytest.mark.parametrize("field,value", [("name", ""), ("budget_limit_usd", -1), ("max_run_duration_seconds", 0)])
+async def test_execution_accepts_stored_values_without_request_only_constraints(
+    storage: Any, execution: Any, field: str, value: Any, pinned: bool
+) -> None:
+    agent, _runs, _db = storage
+    setattr(agent, field, value)
+    run = await runner.create_run(
+        agent_id=agent.id, user_input="question", config_snapshot={field: value} if pinned else None
+    )
+    effective = effective_agent_config(run)
+    assert getattr(effective, field) == value
+    assert (await runner.execute_run(run_id=run.id, llm_service=MagicMock())).status == "completed"
+
+
 @pytest.mark.parametrize("overrides", [False, True])
 async def test_unpinned_run_reads_agent_at_execution_and_records_audit(
     storage: Any, execution: Any, overrides: bool
@@ -233,13 +265,15 @@ async def test_partial_snapshot_freezes_omitted_fields_and_explicit_nulls(storag
 @pytest.mark.parametrize(
     "snapshot",
     [
-        {"goal": ""},
-        {"name": ""},
         {"goal": None},
+        {"name": None},
+        {"goal": 123},
+        {"name": 123},
+        {"description": 123},
         {"model_config": {"max_tokens": 0}},
         {"skill_config": {"skill_ids": ["not-a-uuid"]}},
-        {"budget_limit_usd": -1},
-        {"max_run_duration_seconds": 0},
+        {"budget_limit_usd": "not-a-number"},
+        {"max_run_duration_seconds": "not-an-integer"},
         {"pattern_config": {"execution_pattern": "does-not-exist"}},
         {
             "pattern_config": {

@@ -4,7 +4,8 @@ from copy import deepcopy
 from typing import Any
 
 from motoro.models.run import AgentRun
-from motoro.schemas.agent import AgentCreate, ModelConfig, PartialModelConfig
+from motoro.schemas.agent import ModelConfig
+from motoro.schemas.run_config import AgentExecutionConfig
 
 # Public snapshot keys use the same aliases as AgentCreate/AgentUpdate.
 _AGENT_FIELDS = {
@@ -22,7 +23,7 @@ _AGENT_FIELDS = {
 }
 
 
-def effective_agent_config(run: AgentRun, *, apply_run_overrides: bool = True) -> AgentCreate:
+def effective_agent_config(run: AgentRun, *, apply_run_overrides: bool = True) -> AgentExecutionConfig:
     """Pinned fields win, including explicit nulls; absent fields inherit.
 
     Legacy pattern overrides apply only when the snapshot has no pattern key.
@@ -42,14 +43,12 @@ def effective_agent_config(run: AgentRun, *, apply_run_overrides: bool = True) -
         data["pattern_config"] = deepcopy(run.pattern_overrides)
     overrides = (run.model_config_overrides or {}) if apply_run_overrides else {}
     model_data = {**(data["model_config"] or {}), **overrides}
-    data["model_config"] = PartialModelConfig.model_validate(
-        ModelConfig.model_validate(model_data), from_attributes=True
-    )
+    data["model_config"] = ModelConfig.model_validate(model_data)
     data["memory_config"] = data["memory_config"] or {}
-    return AgentCreate.model_validate(data)
+    return AgentExecutionConfig.model_validate(data)
 
 
-def snapshot_agent_config(config: AgentCreate) -> dict[str, Any]:
+def snapshot_agent_config(config: AgentExecutionConfig) -> dict[str, Any]:
     """Serialize execution fields only; schema serialization excludes secrets."""
     data = config.model_dump(mode="json", by_alias=True)
     return {key: data[key] for key in _AGENT_FIELDS}

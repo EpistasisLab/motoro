@@ -213,6 +213,19 @@ async def test_pinned_variants_execute_with_persisted_settings(monkeypatch: pyte
         assert effective.max_run_duration_seconds == iterations * 10
 
 
+@pytest.mark.parametrize("snapshot", [None, {}, {"goal": ""}])
+async def test_empty_goal_agent_runs_with_and_without_a_snapshot(snapshot: dict[str, Any] | None) -> None:
+    from motoro.runner import create_agent, create_run, execute_run, get_run
+
+    agent = await create_agent(name="canvas-agent", goal="")
+    run = await create_run(agent_id=agent.id, user_input="Answer the question", config_snapshot=snapshot)
+    result = await execute_run(run_id=run.id, llm_service=StubLLM())
+    assert result.status == "completed", result.error
+    stored = await get_run(run.id)
+    assert stored is not None
+    assert stored.config_snapshot["goal"] == ""
+
+
 async def test_fail_run_forces_a_non_terminal_run_to_failed() -> None:
     """fail_run closes out a run that execute_run never got to finish —
     the case a stale-run sweep needs: the process running execute_run died,

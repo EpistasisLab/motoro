@@ -202,9 +202,11 @@ as valid; core has no opinion on which a product picks.
 ### Per-run agent configuration
 
 Use `config_snapshot` to run concurrent variants of one agent. It accepts a
-dict or `AgentUpdate`, with the same public field names and validation as the
-agent schemas. Omitted fields are captured from the agent when the run is
-created; each supplied field replaces that whole setting. Optional fields can
+dict, `AgentSnapshotUpdate`, or `AgentUpdate`, with the same public field names
+as the agent schemas. Snapshot validation accepts empty names/goals and limit
+values allowed in stored agents; model and pattern validation remain unchanged.
+Omitted fields are captured from the agent when the run is created; each
+supplied field replaces that whole setting. Optional fields can
 be explicitly cleared with `None`.
 
 ```python
@@ -239,8 +241,10 @@ writing runtime state into `pattern_overrides`.
 Without a snapshot, the run reads the agent's settings when execution starts,
 then records them in `run.config_snapshot` for audit and subsequent executions.
 `motoro.runner.effective_agent_config(run)` centralizes this resolution and
-returns a validated `AgentCreate`. Budget and duration remain product-enforced
-settings; the helper exposes their pinned values without requiring a product
+returns a validated `AgentExecutionConfig` from `motoro.schemas.run_config`,
+which accepts stored agent values without create-request constraints. Budget
+and duration remain product-enforced settings; the helper exposes their pinned
+values without requiring a product
 to reread the shared agent.
 
 ### Same-named MCP tools

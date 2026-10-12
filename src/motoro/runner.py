@@ -50,6 +50,7 @@ from sqlalchemy.orm import selectinload
 from motoro.models.agent import Agent
 from motoro.models.run import AgentRun, RunStatus, RunStep
 from motoro.schemas.agent import AgentUpdate, ModelConfig
+from motoro.schemas.run_config import AgentSnapshotUpdate
 from motoro.services.run_config import effective_agent_config, snapshot_agent_config
 
 if TYPE_CHECKING:
@@ -386,10 +387,11 @@ async def create_run(
     previously set it or read it back.
 
     *config_snapshot* pins execution settings for this run. It accepts the
-    AgentUpdate schema's public keys (``model_config``, ``memory_config``, etc.).
+    AgentUpdate schema's public keys (``model_config``, ``memory_config``, etc.),
+    accepting empty names/goals and limit values allowed in stored agents.
     Supplied fields, including explicit nulls for optional settings, replace the
     agent's settings; omitted fields are captured from the agent now. The full
-    result is validated with AgentCreate and the pattern registry, serialized
+    result is validated with AgentExecutionConfig and the pattern registry, serialized
     without API keys, and stored in the existing ``config_snapshot`` column.
     Model overrides still apply on top; a pinned pattern takes precedence over
     legacy ``pattern_overrides``. Without a snapshot, settings continue to be
@@ -407,7 +409,12 @@ async def create_run(
     )
     async with _session("create_run") as db:
         if config_snapshot is not None:
-            partial = AgentUpdate.model_validate(config_snapshot)
+            snapshot_input = (
+                config_snapshot.model_dump(mode="json", by_alias=True, exclude_unset=True)
+                if isinstance(config_snapshot, AgentUpdate)
+                else config_snapshot
+            )
+            partial = AgentSnapshotUpdate.model_validate(snapshot_input)
             run.config_snapshot = partial.model_dump(mode="json", by_alias=True, exclude_unset=True)
             run.agent = (
                 await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
