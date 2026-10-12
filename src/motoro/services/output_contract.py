@@ -49,7 +49,7 @@ from motoro.schemas.output import (
 if TYPE_CHECKING:
     from motoro.engine.runtime import AgentRunResult
     from motoro.models.agent import Agent
-    from motoro.schemas.agent import ModelConfig
+    from motoro.schemas.agent import AgentCreate, ModelConfig
     from motoro.services.llm_service import LLMService
 
 log = structlog.get_logger()
@@ -264,7 +264,7 @@ def build_envelope(
 async def finalize_output(
     *,
     llm: LLMService,
-    agent: Agent,
+    agent: Agent | AgentCreate,
     model_config: ModelConfig,
     result: AgentRunResult,
     principal_id: UUID | None = None,

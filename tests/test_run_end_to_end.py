@@ -135,6 +135,84 @@ async def test_output_contract_produces_an_envelope_with_a_payload() -> None:
     assert stored.output == result.output
 
 
+async def test_pinned_variants_execute_with_persisted_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real persistence, skill resolution and SRPA execution on one shared agent."""
+    from motoro.engine.patterns.orchestrator import PatternOrchestrator
+    from motoro.runner import create_agent, create_run, effective_agent_config, execute_run, get_run, update_agent
+    from motoro.schemas.output import parse_envelope
+    from motoro.services.skill_service import create_skill
+
+    owner_id = uuid.uuid4()
+    agent = await create_agent(name="shared", goal="original", owner_id=owner_id)
+    captured: list[Any] = []
+    factory = PatternOrchestrator.from_pattern_config
+
+    def record(runtime: Any, config: Any, **kwargs: Any) -> Any:
+        orchestrator = factory(runtime, config, **kwargs)
+        captured.append((runtime._config, orchestrator))
+        return orchestrator
+
+    monkeypatch.setattr(PatternOrchestrator, "from_pattern_config", record)
+    variants = []
+    for iterations, tokens in [(3, 300), (6, 600)]:
+        skill = await create_skill(
+            name=f"variant-{iterations}",
+            description="Variant instructions",
+            body=f"Use {iterations}",
+            owner_id=owner_id,
+        )
+        run = await create_run(
+            agent_id=agent.id,
+            user_input="question",
+            config_snapshot={
+                "goal": f"goal-{iterations}",
+                "system_prompt": f"prompt-{iterations}",
+                "model_config": {"provider": "openai", "model": "gpt-4o", "max_tokens": tokens},
+                "pattern_config": {
+                    "execution_pattern": "reason_act",
+                    "pattern_params": {"reason_act": {"max_iterations": iterations}},
+                },
+                "skill_config": {"skill_ids": [str(skill.id)]},
+                "output_contract": {"name": f"Verdict{iterations}", "fields": [{"name": "value", "type": "int"}]},
+                "budget_limit_usd": iterations,
+                "max_run_duration_seconds": iterations * 10,
+            },
+        )
+        variants.append((run, skill, iterations, tokens))
+    await update_agent(
+        agent.id,
+        goal="changed",
+        system_prompt="changed",
+        model_config=ModelConfig(max_tokens=1),
+        pattern_config={"execution_pattern": "single_agent_baseline"},
+        skill_config={"skill_ids": []},
+        output_contract={"fields": [{"name": "changed", "type": "bool"}]},
+        budget_limit_usd=999,
+        max_run_duration_seconds=999,
+    )
+    for run, skill, iterations, tokens in variants:
+        stub = StubLLM()
+        result = await execute_run(run_id=run.id, llm_service=stub)
+        assert result.status == "completed", result.error
+        config, orchestrator = captured[-1]
+        assert config.system_prompt == f"prompt-{iterations}"
+        assert config.goal == f"goal-{iterations}"
+        assert config.model_config.max_tokens == tokens
+        assert config.skills[0]["name"] == skill.name
+        assert config.skills[0]["body"] == skill.body
+        assert orchestrator._plugins[0].max_iterations == iterations
+        assert f"complete:Verdict{iterations}" in stub.calls
+        assert parse_envelope(result.output).payload == {"value": None}
+        stored = await get_run(run.id)
+        assert stored is not None
+        assert stored.config_snapshot["system_prompt"] == f"prompt-{iterations}"
+        assert stored.run_metadata["reason_act_state"]["max_iterations"] == iterations
+        assert stored.pattern_overrides is None
+        effective = effective_agent_config(stored)
+        assert effective.budget_limit_usd == iterations
+        assert effective.max_run_duration_seconds == iterations * 10
+
+
 async def test_fail_run_forces_a_non_terminal_run_to_failed() -> None:
     """fail_run closes out a run that execute_run never got to finish —
     the case a stale-run sweep needs: the process running execute_run died,
@@ -213,9 +291,7 @@ async def test_list_runs_metadata_filter_matches_exactly() -> None:
         goal="Answer the question.",
         model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
     )
-    target = await create_run(
-        agent_id=agent.id, user_input="q1", metadata={"experiment_id": "exp-1", "replicate": 3}
-    )
+    target = await create_run(agent_id=agent.id, user_input="q1", metadata={"experiment_id": "exp-1", "replicate": 3})
     await execute_run(run_id=target.id, llm_service=stub)
     other_replicate = await create_run(
         agent_id=agent.id, user_input="q2", metadata={"experiment_id": "exp-1", "replicate": 4}

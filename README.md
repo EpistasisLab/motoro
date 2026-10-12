@@ -199,6 +199,50 @@ execution instead of blocking on it (create the run in the request, execute it
 in a worker) — calling both inline in the same request, like above, is just
 as valid; core has no opinion on which a product picks.
 
+### Per-run agent configuration
+
+Use `config_snapshot` to run concurrent variants of one agent. It accepts a
+dict or `AgentUpdate`, with the same public field names and validation as the
+agent schemas. Omitted fields are captured from the agent when the run is
+created; each supplied field replaces that whole setting. Optional fields can
+be explicitly cleared with `None`.
+
+```python
+run = await create_run(
+    agent_id=agent.id,
+    user_input=user_input,
+    config_snapshot={
+        "system_prompt": "Review the evidence carefully.",
+        "model_config": {"provider": "openai", "model": "gpt-4o", "max_tokens": 2048},
+        "pattern_config": {
+            "execution_pattern": "reason_act",
+            "pattern_params": {"reason_act": {"max_iterations": 6}},
+        },
+        "skill_config": {"skill_ids": [str(skill.id)]},
+        "output_contract": {"fields": [{"name": "approved", "type": "bool"}]},
+    },
+)
+```
+
+Snapshots cover name, goal, description, system prompt, model, pattern, skills,
+output contract, memory, budget and duration. API keys are excluded from
+snapshots; credentials still resolve per call. Skill IDs are pinned, while
+skill bodies resolve at execution time. Tools remain per execution through
+`execute_run(available_tools=...)`.
+
+`model_config_overrides` still shallow-merges on top of the snapshot. A pinned
+pattern takes precedence over `pattern_overrides`; new callers should put their
+pattern in the snapshot. ReAct telemetry is stored in
+`run.run_metadata["reason_act_state"]`, preserving other metadata, instead of
+writing runtime state into `pattern_overrides`.
+
+Without a snapshot, the run reads the agent's settings when execution starts,
+then records them in `run.config_snapshot` for audit and subsequent executions.
+`motoro.runner.effective_agent_config(run)` centralizes this resolution and
+returns a validated `AgentCreate`. Budget and duration remain product-enforced
+settings; the helper exposes their pinned values without requiring a product
+to reread the shared agent.
+
 ```python
 from motoro.runner import fail_run
 

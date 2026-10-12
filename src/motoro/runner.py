@@ -49,7 +49,8 @@ from sqlalchemy.orm import selectinload
 
 from motoro.models.agent import Agent
 from motoro.models.run import AgentRun, RunStatus, RunStep
-from motoro.schemas.agent import ModelConfig
+from motoro.schemas.agent import AgentUpdate, ModelConfig
+from motoro.services.run_config import effective_agent_config, snapshot_agent_config
 
 if TYPE_CHECKING:
     import asyncio
@@ -355,6 +356,7 @@ async def create_run(
     owner_id: uuid.UUID | None = None,
     metadata: dict[str, Any] | None = None,
     model_config_overrides: dict[str, Any] | None = None,
+    config_snapshot: dict[str, Any] | AgentUpdate | None = None,
 ) -> AgentRun:
     """Create a pending run.
 
@@ -382,6 +384,17 @@ async def create_run(
     per run without touching the agent's stored configuration. The column this
     writes (``AgentRun.model_config_overrides``) already existed; nothing
     previously set it or read it back.
+
+    *config_snapshot* pins execution settings for this run. It accepts the
+    AgentUpdate schema's public keys (``model_config``, ``memory_config``, etc.).
+    Supplied fields, including explicit nulls for optional settings, replace the
+    agent's settings; omitted fields are captured from the agent now. The full
+    result is validated with AgentCreate and the pattern registry, serialized
+    without API keys, and stored in the existing ``config_snapshot`` column.
+    Model overrides still apply on top; a pinned pattern takes precedence over
+    legacy ``pattern_overrides``. Without a snapshot, settings continue to be
+    read from the Agent at execution time. Budget/duration settings are exposed
+    by ``effective_agent_config`` for product enforcement.
     """
     run = AgentRun(
         agent_id=agent_id,
@@ -393,6 +406,16 @@ async def create_run(
         model_config_overrides=model_config_overrides,
     )
     async with _session("create_run") as db:
+        if config_snapshot is not None:
+            partial = AgentUpdate.model_validate(config_snapshot)
+            run.config_snapshot = partial.model_dump(mode="json", by_alias=True, exclude_unset=True)
+            run.agent = (
+                await db.execute(select(Agent).where(Agent.id == agent_id, Agent.deleted_at.is_(None)))
+            ).scalar_one()
+            effective = effective_agent_config(run, apply_run_overrides=False)
+            snapshot = snapshot_agent_config(effective)
+            _require_valid_pattern_config(snapshot["pattern_config"])
+            run.config_snapshot = snapshot
         db.add(run)
         await db.commit()
         await db.refresh(run)
@@ -493,8 +516,9 @@ async def execute_run(
     session against core's database for the duration — the runtime writes a
     ``RunStep`` per phase as it goes.
 
-    The execution pattern is: the run's ``pattern_overrides``, else the agent's
-    ``pattern_config``, else ``reason_act`` — except that a model which cannot
+    The execution pattern is: the pinned ``pattern_config``, else the run's
+    ``pattern_overrides``, else the agent's ``pattern_config``, else ``reason_act``
+    — except that a model which cannot
     accept function schemas falls back to ``single_agent_baseline``, since ReAct
     on such a model could only fail.
 
@@ -507,13 +531,12 @@ async def execute_run(
     is passed to the orchestrator, which lifts the ``workspace_id`` and
     ``ambient_meta`` keys out of it onto every MCP tool call's ambient ``_meta``
     (see :func:`create_run`). Not otherwise interpreted here;
-    it is not written back afterward, so it still holds exactly what was seeded
-    at creation once this returns.
+    ReAct adds its loop summary under ``reason_act_state``, preserving caller
+    metadata. Runtime telemetry is never written to ``pattern_overrides``.
 
-    ``run.model_config_overrides`` is shallow-merged onto ``agent.model_config_data``
-    before the effective :class:`ModelConfig` is built — a per-run key wins over
-    the agent's own stored value for that key; anything the run doesn't override
-    still comes from the agent.
+    ``run.model_config_overrides`` is shallow-merged onto the pinned model config
+    (or the agent's model config when absent). Every other execution setting is
+    resolved through :func:`effective_agent_config` as well.
 
     *available_agents* and *agent_messenger* travel together and are the whole
     agent-to-agent surface: the first says which peers this run may consult, the
@@ -535,21 +558,28 @@ async def execute_run(
             await db.execute(select(AgentRun).options(selectinload(AgentRun.agent)).where(AgentRun.id == run_id))
         ).scalar_one()
         agent = run.agent
-
-        effective_model_config_data = {**(agent.model_config_data or {}), **(run.model_config_overrides or {})}
-        model_config = ModelConfig(**effective_model_config_data)
+        effective = effective_agent_config(run)
+        if run.config_snapshot is None:
+            # Record what an unpinned run actually used, also stabilizing later
+            # executions of a paused run against edits to the shared agent.
+            run.config_snapshot = snapshot_agent_config(effective)
+        model_config = ModelConfig.model_validate(effective.model_config_data, from_attributes=True)
         # Resolved here, once, rather than inside the engine: the engine never
         # reaches for a table, and a run then carries the skill *text* it
         # started with, so editing a skill mid-run cannot change the
         # instructions the agent is halfway through following.
-        skills = await resolve_skills(agent.skill_config, owner_id=agent.owner_id, db=db)
+        skills = await resolve_skills(
+            effective.skill_config.model_dump(mode="json") if effective.skill_config is not None else None,
+            owner_id=agent.owner_id,
+            db=db,
+        )
         config = AgentConfig(
             agent_id=agent.id,
-            name=agent.name,
-            goal=agent.goal,
-            system_prompt=agent.system_prompt or f"You are {agent.name}. {agent.description}",
+            name=effective.name,
+            goal=effective.goal,
+            system_prompt=effective.system_prompt or f"You are {effective.name}. {effective.description}",
             model_config=model_config,
-            memory_config_data=agent.memory_config_data or {},
+            memory_config_data=effective.memory_config.model_dump(mode="json"),
             skills=skills,
         )
 
@@ -572,7 +602,7 @@ async def execute_run(
         )
         orchestrator = PatternOrchestrator.from_pattern_config(
             runtime,
-            run.pattern_overrides or agent.pattern_config,
+            effective.pattern_config.model_dump(mode="json") if effective.pattern_config is not None else None,
             default_execution_pattern=default_pattern,
         )
 
@@ -588,7 +618,7 @@ async def execute_run(
 
         run.status = RunStatus(result.status)
         run.output = await finalize_output(
-            llm=llm, agent=agent, model_config=model_config, result=result, principal_id=run.owner_id
+            llm=llm, agent=effective, model_config=model_config, result=result, principal_id=run.owner_id
         )
         result.output = run.output  # keep the returned result consistent with the persisted row
         run.error = result.error
@@ -646,6 +676,7 @@ __all__ = [
     "create_agent",
     "create_run",
     "execute_run",
+    "effective_agent_config",
     "fail_run",
     "get_agent",
     "get_agent_by_name",
