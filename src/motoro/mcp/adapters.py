@@ -8,6 +8,7 @@ import json
 import re
 import time
 import uuid
+from collections import Counter
 from typing import Any
 
 import structlog
@@ -416,13 +417,18 @@ def _tool_in_allowlist(
     a namespaced ``name`` (``server.tool``); matching against the *resolved*
     identity makes namespaced vs bare requests behave identically. The persisted
     registration ID is required; name-only legacy descriptors fail closed.
+    A legacy namespaced ``tool_name`` is accepted only for that same identity.
     """
     for tool in available_tools:
         t_server_id = tool.get("server_id")
         t_server = tool.get("server")
         t_bare = str(tool.get("tool_name") or "")
         # Precise match on the resolved server + bare tool name.
-        if str(t_server_id or "") == str(server_id) and t_server == server_name and t_bare == bare_tool:
+        if (
+            str(t_server_id or "") == str(server_id)
+            and t_server == server_name
+            and t_bare in {bare_tool, f"{server_name}.{bare_tool}"}
+        ):
             return True
     return False
 
@@ -523,12 +529,34 @@ def _sanitize_openai_tool_name(bare_name: str) -> str:
     return f"{sanitized[:prefix_budget]}_{digest}"
 
 
+def _descriptor_tool_names(tool: dict[str, Any]) -> tuple[str, str]:
+    """Return bare and namespaced names, including the legacy ASAREE shape."""
+    name = str(tool.get("name") or "")
+    bare = str(tool.get("tool_name") or name or "unknown")
+    server = str(tool.get("server") or "")
+    prefix = f"{server}."
+    if server and bare.startswith(prefix) and (not name or name == bare):
+        bare = bare[len(prefix) :]
+    qualified = f"{server}.{bare}" if server else (name or bare)
+    return bare, qualified
+
+
+def tool_names_for_run(tools: list[dict[str, Any]]) -> list[str]:
+    """Use readable bare names unless the run's catalog requires namespacing.
+
+    Native projection and text selection share this rule. Counting normalized
+    bare names also handles catalogs mixing plain and legacy descriptors.
+    """
+    names = [_descriptor_tool_names(tool) for tool in tools]
+    counts = Counter(bare for bare, _qualified in names)
+    return [qualified if counts[bare] > 1 else bare for bare, qualified in names]
+
+
 def tools_to_openai_format(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Convert MCP tool descriptors to OpenAI/Anthropic native tool format."""
     result = []
-    for tool in tools:
-        bare_name = str(tool.get("tool_name") or tool.get("name", "unknown"))
-        safe_name = _sanitize_openai_tool_name(bare_name)
+    for tool, dispatch_name in zip(tools, tool_names_for_run(tools), strict=True):
+        safe_name = _sanitize_openai_tool_name(dispatch_name)
         description = str(tool.get("description", ""))
         server_instructions = str(tool.get("server_instructions", "")).strip()
         if server_instructions:
@@ -563,23 +591,21 @@ def tools_to_openai_format(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def build_openai_tool_name_map(tools: list[dict[str, Any]]) -> dict[str, str]:
-    """Map sanitized OpenAI tool names back to their original MCP names.
+    """Map provider names back to collision-safe MCP dispatch names.
 
     :func:`tools_to_openai_format` rewrites names to satisfy the provider's
     ``^[a-zA-Z0-9_-]{1,64}$`` constraint, so the name the model calls back with
     is not necessarily resolvable by :class:`MCPToolExecutor`. Callers that bind
-    native tool schemas must translate through this map before dispatch.
+    native tool schemas must translate through this map before dispatch. Tools
+    sharing a bare name resolve to their namespaced ``server.tool`` identity.
     """
     mapping: dict[str, str] = {}
-    for tool in tools:
-        bare_name = str(tool.get("tool_name") or tool.get("name", "unknown"))
-        mapping[_sanitize_openai_tool_name(bare_name)] = bare_name
+    for dispatch_name in tool_names_for_run(tools):
+        mapping[_sanitize_openai_tool_name(dispatch_name)] = dispatch_name
     return mapping
 
 
-def get_tools_for_context(
-    registry: MCPServerRegistry, *, owner_id: uuid.UUID | None = None
-) -> list[dict[str, Any]]:
+def get_tools_for_context(registry: MCPServerRegistry, *, owner_id: uuid.UUID | None = None) -> list[dict[str, Any]]:
     """Get tool descriptions formatted for the Sense phase context."""
     return registry.get_all_tools(owner_id=owner_id)
 

@@ -240,7 +240,7 @@ class ReasonActPlugin(PatternPlugin):
         }
 
     async def _persist_state(self, context: RunContext) -> None:
-        """Mirror the loop summary into ``agent_runs.pattern_overrides``.
+        """Mirror the loop summary into ``agent_runs.run_metadata``.
 
         Best-effort, exactly as ``adaptive_retry`` does it: this is telemetry,
         and losing it must never fail a run that otherwise succeeded.
@@ -261,9 +261,9 @@ class ReasonActPlugin(PatternPlugin):
             run = result.scalar_one_or_none()
             if run is None:
                 return
-            overrides = dict(run.pattern_overrides or {})
-            overrides[_KEY_STATE] = self._state(context)
-            run.pattern_overrides = overrides
+            metadata = dict(run.run_metadata or {})
+            metadata[_KEY_STATE] = self._state(context)
+            run.run_metadata = metadata
             await db.commit()
         except Exception:
             log.debug("reason_act.persist_state_failed", exc_info=True)

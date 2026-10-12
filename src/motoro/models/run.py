@@ -68,13 +68,13 @@ class AgentRun(Base):
         JSON, nullable=True, doc="Serialized RunContext for paused runs"
     )
     pattern_overrides: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True, doc="Per-run PatternConfig overrides merged with agent config"
+        JSON, nullable=True, doc="Legacy per-run pattern config; used when no pattern is pinned in config_snapshot"
     )
     model_config_overrides: Mapped[dict[str, Any] | None] = mapped_column(
-        JSON, nullable=True, doc="Per-run partial ModelConfig override deep-merged onto the agent's model_config"
+        JSON, nullable=True, doc="Per-run partial ModelConfig shallow-merged onto the effective model config"
     )
     config_snapshot: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True, doc="Resolved agent config snapshot captured at dispatch time"
+        JSONB, nullable=True, doc="Pinned execution config captured at dispatch, or recorded at first execution"
     )
     run_metadata: Mapped[dict[str, Any] | None] = mapped_column(
         "run_metadata",

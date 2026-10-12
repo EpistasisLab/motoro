@@ -637,15 +637,11 @@ class ActPhase:
         then be silently unable to reach mid-step; the callable set simply
         narrows to tools.
         """
-        from motoro.mcp.adapters import MCPToolExecutor
+        from motoro.mcp.adapters import MCPToolExecutor, tool_names_for_run
         from motoro.schemas.llm import PlanStep as _PlanStep
 
         mcp = self._mcp_executor if isinstance(self._mcp_executor, MCPToolExecutor) else None
-        tool_names = [
-            str(t.get("tool_name") or t.get("name", ""))
-            for t in context.available_tools
-            if t.get("tool_name") or t.get("name")
-        ]
+        tool_names = tool_names_for_run(context.available_tools)
         if mcp is None or not tool_names:
             text, plain_record = await self._default_executor.execute_step(step, context)
             return _StepOutcome(text=text, llm_record=plain_record)

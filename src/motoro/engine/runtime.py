@@ -711,15 +711,15 @@ def _validate_plan_tools(
     if not plan.steps:
         return
 
-    # Build set of valid names: both namespaced ("server.tool") and bare ("tool")
-    valid_names: set[str] = set()
+    from motoro.mcp.adapters import tool_names_for_run
+
+    # Bare names are valid only when unique in the run's catalog. Namespaced
+    # names from the prompt remain valid for every granted tool.
+    valid_names = set(tool_names_for_run(available_tools))
     for t in available_tools:
         full_name = str(t.get("name", ""))
-        bare_name = str(t.get("tool_name", ""))
         if full_name:
             valid_names.add(full_name)
-        if bare_name:
-            valid_names.add(bare_name)
     valid_names.update(build_agent_name_map(available_agents or []))
 
     if not valid_names:
