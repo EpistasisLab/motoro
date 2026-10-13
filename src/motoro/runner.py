@@ -534,6 +534,7 @@ async def list_run_summaries(
     stmt = select(
         AgentRun.id,
         AgentRun.agent_id,
+        AgentRun.owner_id,
         AgentRun.status,
         AgentRun.token_usage,
         AgentRun.cost_estimate,

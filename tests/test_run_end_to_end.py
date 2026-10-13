@@ -382,7 +382,7 @@ async def test_list_run_summaries_matches_metadata_values_and_ids_in_keyset_page
         owner_id=owner, metadata_key="batch", metadata_values=["b-0", "b-1", "b-2", "1"], run_ids=[referenced.id]
     )
     assert [row["id"] for row in rows] == expected
-    assert "input" not in rows[0] and rows[0]["run_metadata"] is not None
+    assert "input" not in rows[0] and rows[0]["run_metadata"] is not None and rows[0]["owner_id"] == owner
 
     first = await list_run_summaries(
         owner_id=owner, metadata_key="batch", metadata_values=["b-0", "b-1", "b-2"], limit=2
