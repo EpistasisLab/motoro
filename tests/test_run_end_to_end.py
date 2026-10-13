@@ -419,3 +419,43 @@ async def test_list_run_step_summaries_pages_previews_and_respects_owner() -> No
     assert [item["sequence"] for item in rest["items"]] == [step.sequence for step in steps[1:]]
     assert rest["next_after"] is None
     assert (await list_run_step_summaries(run.id, owner_id=uuid.uuid4()))["items"] == []
+
+
+async def test_read_run_input_and_step_chunks_slice_in_the_database_and_respect_owner() -> None:
+    import json
+
+    from motoro.runner import (
+        create_agent,
+        create_run,
+        execute_run,
+        get_run_steps,
+        read_run_input_chunk,
+        read_run_step_chunk,
+    )
+
+    owner = uuid.uuid4()
+    agent = await create_agent(
+        name=f"test-chunks-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        owner_id=owner,
+    )
+    run = await create_run(agent_id=agent.id, user_input="abcdefghij", owner_id=owner)
+    await execute_run(run_id=run.id, llm_service=StubLLM())
+
+    assert await read_run_input_chunk(run.id, owner_id=owner, offset=0, limit=4) == {"text": "abcd", "next_offset": 4}
+    assert await read_run_input_chunk(run.id, owner_id=owner, offset=8, limit=4) == {"text": "ij", "next_offset": None}
+    assert await read_run_input_chunk(run.id, owner_id=uuid.uuid4()) is None
+
+    step = (await get_run_steps(run.id))[0]
+    parts, offset = [], 0
+    while offset is not None:
+        chunk = await read_run_step_chunk(run.id, step.id, owner_id=owner, offset=offset, limit=7)
+        assert chunk is not None
+        parts.append(chunk["text"])
+        offset = chunk["next_offset"]
+    assert set(json.loads("".join(parts))) == {"input", "output", "llm_call", "tool_call"}
+    assert await read_run_step_chunk(run.id, uuid.uuid4(), owner_id=owner) is None
+    assert await read_run_step_chunk(run.id, step.id, owner_id=uuid.uuid4()) is None
+    with pytest.raises(ValueError):
+        await read_run_input_chunk(run.id, limit=0)

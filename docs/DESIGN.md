@@ -118,8 +118,9 @@ back, the runner exposes reads as well as writes: `get_agent`,
 session — core's sessionmaker sets `expire_on_commit=False` — so a product can
 read `run.status` and `run.token_usage` without a live connection. For bulk
 reads, `list_run_summaries` (runs matched by a product's own metadata key, as
-keyset pages of scalar columns) and `list_run_step_summaries` (a trace page with
-output previews) return plain dicts and are backed by core's own indexes, so a
+keyset pages of scalar columns), `list_run_step_summaries` (a trace page with
+output previews), and `read_run_input_chunk`/`read_run_step_chunk` (a large prompt
+or step document sliced in the database) return plain dicts and are backed by core's own indexes, so a
 product never needs to index core's tables itself.
 
 **This costs three things, and they are real:**

@@ -588,6 +588,77 @@ async def list_run_step_summaries(
     return {"items": rows[:limit], "next_after": rows[limit - 1]["sequence"] if len(rows) > limit else None}
 
 
+MAX_TEXT_CHUNK = 65536
+
+
+def _chunk(row: Any, offset: int, limit: int) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return {"text": row.text, "next_offset": offset + limit if row.length > offset + limit else None}
+
+
+def _check_chunk(offset: int, limit: int) -> None:
+    if offset < 0 or not 1 <= limit <= MAX_TEXT_CHUNK:
+        raise ValueError(f"offset must be >= 0 and limit between 1 and {MAX_TEXT_CHUNK}")
+
+
+async def read_run_input_chunk(
+    run_id: uuid.UUID, *, owner_id: uuid.UUID | None = None, offset: int = 0, limit: int = 16384
+) -> dict[str, Any] | None:
+    """``limit`` characters of a run's input (its prompt) starting at ``offset``.
+
+    Sliced in the database, so a very large prompt is never loaded whole.
+    Returns ``{"text", "next_offset"}`` (``next_offset`` is ``None`` at the end),
+    or ``None`` when the run doesn't exist or belongs to another ``owner_id``.
+    """
+    _check_chunk(offset, limit)
+    stmt = select(
+        func.substr(AgentRun.input, offset + 1, limit).label("text"), func.length(AgentRun.input).label("length")
+    ).where(AgentRun.id == run_id)
+    if owner_id is not None:
+        stmt = stmt.where(AgentRun.owner_id == owner_id)
+    async with _session("read_run_input_chunk") as db:
+        return _chunk((await db.execute(stmt)).one_or_none(), offset, limit)
+
+
+async def read_run_step_chunk(
+    run_id: uuid.UUID,
+    step_id: uuid.UUID,
+    *,
+    owner_id: uuid.UUID | None = None,
+    offset: int = 0,
+    limit: int = 16384,
+) -> dict[str, Any] | None:
+    """A chunk of one step's complete evidence as JSON text.
+
+    The document is ``{"input", "output", "llm_call", "tool_call"}`` serialized
+    once in the database, so consecutive chunks concatenate to valid JSON and
+    offsets stay stable between calls. Same return contract as
+    :func:`read_run_input_chunk`; ``None`` also when the step isn't in that run.
+    """
+    _check_chunk(offset, limit)
+    document = cast(
+        func.jsonb_build_object(
+            "input",
+            RunStep.input,
+            "output",
+            RunStep.output,
+            "llm_call",
+            RunStep.llm_call,
+            "tool_call",
+            RunStep.tool_call,
+        ),
+        Text,
+    )
+    stmt = select(func.substr(document, offset + 1, limit).label("text"), func.length(document).label("length")).where(
+        RunStep.run_id == run_id, RunStep.id == step_id
+    )
+    if owner_id is not None:
+        stmt = stmt.join(AgentRun, AgentRun.id == RunStep.run_id).where(AgentRun.owner_id == owner_id)
+    async with _session("read_run_step_chunk") as db:
+        return _chunk((await db.execute(stmt)).one_or_none(), offset, limit)
+
+
 # --------------------------------------------------------------------------- #
 #  Execution                                                                   #
 # --------------------------------------------------------------------------- #
