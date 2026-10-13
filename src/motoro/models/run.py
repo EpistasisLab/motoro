@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, Text, func
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, Text, func, text
 from sqlalchemy.dialects.postgresql import JSON, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -102,6 +102,10 @@ class AgentRun(Base):
     __table_args__ = (
         Index("ix_agent_runs_agent_id", "agent_id"),
         Index("ix_agent_runs_status", "status"),
+        # Containment lookups over the product-opaque metadata, whatever keys a
+        # product stamps -- see runner.list_run_summaries. The column is JSON,
+        # so the index (and every query meant to use it) casts to jsonb.
+        Index("ix_agent_runs_run_metadata", text("(run_metadata::jsonb) jsonb_path_ops"), postgresql_using="gin"),
     )
 
 
@@ -140,4 +144,8 @@ class RunStep(Base):
     # Relationships
     run: Mapped["AgentRun"] = relationship(back_populates="steps", lazy="selectin")
 
-    __table_args__ = (Index("ix_run_steps_run_id", "run_id"),)
+    __table_args__ = (
+        Index("ix_run_steps_run_id", "run_id"),
+        # Keyset paging through a run's trace -- see runner.list_run_step_summaries.
+        Index("ix_run_steps_run_sequence", "run_id", "sequence"),
+    )

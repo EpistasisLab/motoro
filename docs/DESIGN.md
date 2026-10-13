@@ -116,7 +116,11 @@ back, the runner exposes reads as well as writes: `get_agent`,
 `get_agent_by_name`, `list_agents`, `get_run`, `get_runs`, `list_runs`,
 `get_run_steps`. Returned ORM objects are usable after core closes its
 session — core's sessionmaker sets `expire_on_commit=False` — so a product can
-read `run.status` and `run.token_usage` without a live connection.
+read `run.status` and `run.token_usage` without a live connection. For bulk
+reads, `list_run_summaries` (runs matched by a product's own metadata key, as
+keyset pages of scalar columns) and `list_run_step_summaries` (a trace page with
+output previews) return plain dicts and are backed by core's own indexes, so a
+product never needs to index core's tables itself.
 
 **This costs three things, and they are real:**
 

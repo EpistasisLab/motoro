@@ -44,7 +44,8 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, select
+from sqlalchemy import Text, cast, false, func, or_, select
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import selectinload
 
 from motoro.models.agent import Agent
@@ -495,6 +496,96 @@ async def get_run_steps(run_id: uuid.UUID) -> Sequence[RunStep]:
             .scalars()
             .all()
         )
+
+
+MAX_SUMMARY_PAGE = 200
+MAX_STEP_PAGE = 100
+
+
+async def list_run_summaries(
+    *,
+    owner_id: uuid.UUID | None = None,
+    metadata_key: str | None = None,
+    metadata_values: Sequence[Any] = (),
+    run_ids: Sequence[uuid.UUID] = (),
+    after_id: uuid.UUID | None = None,
+    limit: int = MAX_SUMMARY_PAGE,
+) -> list[dict[str, Any]]:
+    """Scalar facts for runs a product attributed to itself, one keyset page at a time.
+
+    Matches runs whose ``run_metadata[metadata_key]`` equals any of
+    ``metadata_values`` (a JSON-typed comparison: the string ``"5"`` does not
+    match the number ``5``), or whose id is in ``run_ids``. Use it for
+    accounting over many runs: unlike :func:`list_runs` it never loads a run's
+    input, output, snapshots or steps, and the metadata match is served by the
+    ``ix_agent_runs_run_metadata`` index rather than a scan. Pages are ordered
+    by id; pass the last row's id as ``after_id`` for the next one.
+    """
+    if not 1 <= limit <= MAX_SUMMARY_PAGE or len(metadata_values) > MAX_SUMMARY_PAGE or len(run_ids) > MAX_SUMMARY_PAGE:
+        raise ValueError(f"limit and each match list must be between 1 and {MAX_SUMMARY_PAGE}")
+    matches = []
+    if metadata_key is not None and metadata_values:
+        # Must be this exact expression (jsonb cast, then @>) for the planner to
+        # pick the GIN index; the ORed containments become one BitmapOr.
+        document = cast(AgentRun.run_metadata, JSONB)
+        matches.extend(document.contains({metadata_key: value}) for value in metadata_values)
+    if run_ids:
+        matches.append(AgentRun.id.in_(list(run_ids)))
+    stmt = select(
+        AgentRun.id,
+        AgentRun.agent_id,
+        AgentRun.status,
+        AgentRun.token_usage,
+        AgentRun.cost_estimate,
+        AgentRun.run_metadata,
+        AgentRun.created_at,
+        AgentRun.started_at,
+        AgentRun.completed_at,
+    ).where(or_(*matches) if matches else false())
+    if owner_id is not None:
+        stmt = stmt.where(AgentRun.owner_id == owner_id)
+    if after_id is not None:
+        stmt = stmt.where(AgentRun.id > after_id)
+    async with _session("list_run_summaries") as db:
+        return [dict(row) for row in (await db.execute(stmt.order_by(AgentRun.id).limit(limit))).mappings()]
+
+
+async def list_run_step_summaries(
+    run_id: uuid.UUID,
+    *,
+    owner_id: uuid.UUID | None = None,
+    after_sequence: int = -1,
+    limit: int = 20,
+    preview_chars: int = 2048,
+) -> dict[str, Any]:
+    """One page of a run's trace without its full step payloads.
+
+    Each item carries step metadata plus the first ``preview_chars`` of its
+    output as JSON text; load a whole step only once someone selects it. Returns
+    ``{"items": [...], "next_after": sequence | None}``; pass ``next_after`` back
+    as ``after_sequence``. With ``owner_id``, another owner's run reads as empty.
+    """
+    if not 1 <= limit <= MAX_STEP_PAGE:
+        raise ValueError(f"limit must be between 1 and {MAX_STEP_PAGE}")
+    stmt = (
+        select(
+            RunStep.id,
+            RunStep.sequence,
+            RunStep.iteration,
+            RunStep.phase,
+            RunStep.started_at,
+            RunStep.completed_at,
+            func.left(cast(RunStep.output, Text), preview_chars).label("preview"),
+        )
+        .where(RunStep.run_id == run_id, RunStep.sequence > after_sequence)
+        .order_by(RunStep.sequence)
+        .limit(limit + 1)
+    )
+    if owner_id is not None:
+        stmt = stmt.join(AgentRun, AgentRun.id == RunStep.run_id).where(AgentRun.owner_id == owner_id)
+    async with _session("list_run_step_summaries") as db:
+        rows = [dict(row) for row in (await db.execute(stmt)).mappings()]
+    return {"items": rows[:limit], "next_after": rows[limit - 1]["sequence"] if len(rows) > limit else None}
 
 
 # --------------------------------------------------------------------------- #
