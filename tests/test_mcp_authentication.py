@@ -379,7 +379,10 @@ def test_model_and_migration_shape_hide_and_persist_authentication() -> None:
     assert 'revision: str = "6a4d9f2c7e10"' in revision_source
     assert 'down_revision: str | None = "2e6f4c8a91d3"' in revision_source
     config = make_config("postgresql+asyncpg://unused:unused@localhost/unused")
-    assert ScriptDirectory.from_config(config).get_heads() == ["6a4d9f2c7e10"]
+    script = ScriptDirectory.from_config(config)
+    # Later revisions may follow; this one must stay on the single chain.
+    assert len(script.get_heads()) == 1
+    assert "6a4d9f2c7e10" in {revision.revision for revision in script.walk_revisions()}
     row = MCPServerConfig(
         id=uuid.uuid4(),
         name="safe",

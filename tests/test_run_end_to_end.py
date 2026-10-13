@@ -355,3 +355,107 @@ async def test_registry_holds_exactly_the_migrated_patterns() -> None:
 
     PluginRegistry.discover(raise_on_error=True)
     assert sorted(PluginRegistry.all()) == ["reason_act", "single_agent_baseline"]
+
+
+async def test_list_run_summaries_matches_metadata_values_and_ids_in_keyset_pages() -> None:
+    """Bulk accounting reads: any of several metadata values or explicit ids,
+    owner-scoped, typed JSON comparison, paged by id, scalar columns only."""
+    from motoro.runner import create_agent, create_run, list_run_summaries
+
+    owner, stranger = uuid.uuid4(), uuid.uuid4()
+    agent = await create_agent(
+        name=f"test-run-summaries-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        owner_id=owner,
+    )
+    tagged = [
+        await create_run(agent_id=agent.id, user_input="q", metadata={"batch": f"b-{i}"}, owner_id=owner)
+        for i in range(3)
+    ]
+    referenced = await create_run(agent_id=agent.id, user_input="q", metadata={}, owner_id=owner)
+    await create_run(agent_id=agent.id, user_input="q", metadata={"batch": 1}, owner_id=owner)  # number, not "1"
+    await create_run(agent_id=agent.id, user_input="q", metadata={"batch": "b-0"}, owner_id=stranger)
+
+    expected = sorted([*(run.id for run in tagged), referenced.id])
+    rows = await list_run_summaries(
+        owner_id=owner, metadata_key="batch", metadata_values=["b-0", "b-1", "b-2", "1"], run_ids=[referenced.id]
+    )
+    assert [row["id"] for row in rows] == expected
+    assert "input" not in rows[0] and rows[0]["run_metadata"] is not None and rows[0]["owner_id"] == owner
+
+    first = await list_run_summaries(
+        owner_id=owner, metadata_key="batch", metadata_values=["b-0", "b-1", "b-2"], limit=2
+    )
+    rest = await list_run_summaries(
+        owner_id=owner, metadata_key="batch", metadata_values=["b-0", "b-1", "b-2"], after_id=first[-1]["id"]
+    )
+    assert [row["id"] for row in first + rest] == sorted(run.id for run in tagged)
+    assert await list_run_summaries(owner_id=owner) == []
+    with pytest.raises(ValueError):
+        await list_run_summaries(owner_id=owner, run_ids=[uuid.uuid4()] * 201)
+
+
+async def test_list_run_step_summaries_pages_previews_and_respects_owner() -> None:
+    from motoro.runner import create_agent, create_run, execute_run, get_run_steps, list_run_step_summaries
+
+    owner = uuid.uuid4()
+    agent = await create_agent(
+        name=f"test-step-summaries-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        owner_id=owner,
+    )
+    run = await create_run(agent_id=agent.id, user_input="q", owner_id=owner)
+    await execute_run(run_id=run.id, llm_service=StubLLM())
+    steps = await get_run_steps(run.id)
+    assert len(steps) >= 2
+
+    page = await list_run_step_summaries(run.id, owner_id=owner, limit=1, preview_chars=5)
+    assert [item["sequence"] for item in page["items"]] == [steps[0].sequence]
+    assert page["next_after"] == steps[0].sequence
+    assert all(len(item["preview"] or "") <= 5 for item in page["items"])
+    rest = await list_run_step_summaries(run.id, owner_id=owner, after_sequence=page["next_after"], limit=100)
+    assert [item["sequence"] for item in rest["items"]] == [step.sequence for step in steps[1:]]
+    assert rest["next_after"] is None
+    assert (await list_run_step_summaries(run.id, owner_id=uuid.uuid4()))["items"] == []
+
+
+async def test_read_run_input_and_step_chunks_slice_in_the_database_and_respect_owner() -> None:
+    import json
+
+    from motoro.runner import (
+        create_agent,
+        create_run,
+        execute_run,
+        get_run_steps,
+        read_run_input_chunk,
+        read_run_step_chunk,
+    )
+
+    owner = uuid.uuid4()
+    agent = await create_agent(
+        name=f"test-chunks-{uuid.uuid4().hex[:8]}",
+        goal="Answer the question.",
+        model_config=ModelConfig(provider=LLMProvider.ANTHROPIC, model="claude-sonnet-5", api_key="stub"),
+        owner_id=owner,
+    )
+    run = await create_run(agent_id=agent.id, user_input="abcdefghij", owner_id=owner)
+    await execute_run(run_id=run.id, llm_service=StubLLM())
+
+    assert await read_run_input_chunk(run.id, owner_id=owner, offset=0, limit=4) == {"text": "abcd", "next_offset": 4}
+    assert await read_run_input_chunk(run.id, owner_id=owner, offset=8, limit=4) == {"text": "ij", "next_offset": None}
+    assert await read_run_input_chunk(run.id, owner_id=uuid.uuid4()) is None
+
+    step = (await get_run_steps(run.id))[0]
+    parts, offset = [], 0
+    while offset is not None:
+        chunk = await read_run_step_chunk(run.id, step.id, owner_id=owner, offset=offset, limit=7)
+        assert chunk is not None
+        parts.append(chunk["text"])
+        offset = chunk["next_offset"]
+    assert set(json.loads("".join(parts))) == {"input", "output", "llm_call", "tool_call"}
+    assert await read_run_step_chunk(run.id, uuid.uuid4(), owner_id=owner) is None
+    assert await read_run_step_chunk(run.id, step.id, owner_id=uuid.uuid4()) is None
+    with pytest.raises(ValueError):
+        await read_run_input_chunk(run.id, limit=0)
