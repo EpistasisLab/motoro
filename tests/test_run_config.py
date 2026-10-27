@@ -158,7 +158,7 @@ async def test_two_pinned_runs_survive_shared_agent_mutation(storage: Any, execu
         assert config.system_prompt == snapshot["system_prompt"]
         assert config.model_config.max_tokens == snapshot["model_config"]["max_tokens"]
         assert config.model_config.temperature == 0.2
-        assert run.config_snapshot["model_config"]["temperature"] == 0.7
+        assert run.config_snapshot["model_config"]["temperature"] is None
         assert (
             orchestrator._plugins[0].max_iterations
             == snapshot["pattern_config"]["pattern_params"]["reason_act"]["max_iterations"]

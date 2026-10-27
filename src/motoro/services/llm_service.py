@@ -36,6 +36,7 @@ from motoro.services.llm_errors import (
     normalize_llm_error,
 )
 from motoro.services.model_capabilities import get_capabilities
+from motoro.services.sampling import SamplingConfigurationError, UnsupportedEffortError, resolve_sampling
 
 # ---------------------------------------------------------------------------
 # Per-run budget check — M75 / Issue #678
@@ -169,35 +170,16 @@ def _build_model_string(config: ModelConfig) -> str:
     return f"{prefix}/{config.model}"
 
 
-class UnsupportedEffortError(ValueError):
-    """Configured effort is incompatible with the effective model's capabilities."""
-
-
 def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
-    """Per-model sampling controls for the litellm call.
-
-    Caller-resolved capabilities take precedence over the registry. Effort-only
-    models always receive configured effort or the resolved default, never temperature.
-    Models accepting both controls retain the existing temperature-first behavior.
-    """
+    """Adapt shared resolution to LiteLLM, including its narrow OpenRouter escape hatch."""
     caps = config.resolved_capabilities or get_capabilities(model_str)
-    if config.effort is not None and (not caps.supports_effort or config.effort not in caps.effort_levels):
-        raise UnsupportedEffortError(
-            f"Unsupported effort {config.effort!r} for model {model_str!r}; "
-            f"supported levels: {caps.effort_levels}"
-        )
-    if caps.supports_temperature:
-        return {"temperature": config.temperature}
-    if caps.supports_effort:
-        kwargs: dict[str, Any] = {
-            "reasoning_effort": config.effort if config.effort is not None else caps.default_effort
-        }
-        if config.resolved_capabilities is not None and model_str.startswith("openrouter/"):
-            # Live OpenRouter metadata can be newer than LiteLLM's model map.
-            # Allow only the effort we just validated, on this request alone.
-            kwargs["allowed_openai_params"] = ["reasoning_effort"]
-        return kwargs
-    return {}
+    resolved = resolve_sampling(caps, temperature=config.temperature, effort=config.effort, model=model_str)
+    kwargs: dict[str, Any] = resolved.as_kwargs()
+    if resolved.effort is not None and config.resolved_capabilities is not None and model_str.startswith("openrouter/"):
+        # Live metadata can be newer than LiteLLM's model map. Allow only the
+        # effort validated by the shared resolver, on this request alone.
+        kwargs["allowed_openai_params"] = ["reasoning_effort"]
+    return kwargs
 
 
 def model_supports_tool_calling(config: ModelConfig) -> bool:
@@ -333,10 +315,10 @@ _RETRY_WAIT = wait_combine(
 def _retry_predicate(exc: BaseException) -> bool:
     """Tenacity ``retry`` predicate that also honors per-run budget aborts.
 
-    Returns ``False`` for :class:`LLMBudgetExceededError` so the retry loop
-    re-raises immediately without sleeping or making another attempt.
+    Budget exhaustion and invalid sampling configuration re-raise immediately
+    without sleeping or making another attempt.
     """
-    if isinstance(exc, LLMBudgetExceededError):
+    if isinstance(exc, (LLMBudgetExceededError, SamplingConfigurationError)):
         return False
     return _is_retryable(exc)
 
@@ -459,7 +441,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete(cfg, messages, response_model, max_retries, principal_id)
-                except (LLMBudgetExceededError, UnsupportedEffortError):
+                except (LLMBudgetExceededError, SamplingConfigurationError):
                     # Budget exhaustion and invalid sampling config are terminal.
                     raise
                 except Exception as exc:
@@ -656,7 +638,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_with_tools(cfg, messages, tools, principal_id, max_retries)
-                except (LLMBudgetExceededError, UnsupportedEffortError):
+                except (LLMBudgetExceededError, SamplingConfigurationError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -968,7 +950,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_text(cfg, messages, principal_id)
-                except (LLMBudgetExceededError, UnsupportedEffortError):
+                except (LLMBudgetExceededError, SamplingConfigurationError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -1205,6 +1187,7 @@ __all__ = [
     "LLMRateLimitError",
     "LLMBudgetExceededError",
     "BudgetCheck",
+    "SamplingConfigurationError",
     "UnsupportedEffortError",
 ]
 

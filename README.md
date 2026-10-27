@@ -51,8 +51,8 @@ real bugs that shaped each of those decisions.
 - Multi-provider structured output via litellm + Instructor
 - Anthropic (direct, Microsoft Foundry, or Bedrock), OpenAI, OpenRouter, and
   any self-hosted OpenAI-compatible server
-- `model_capabilities` decides per model whether to send `temperature` or the
-  adaptive-thinking `effort` dial, so call sites don't have to know
+- `model_capabilities` describes independent temperature and effort support;
+  `sampling.resolve_sampling` selects and validates both controls
 - Structured-output retries, per-call timeouts, equal-jitter backoff
 
 **Output contracts**
@@ -315,10 +315,24 @@ set_credential_resolver(my_resolver)   # e.g. ASAREE reads a per-user settings t
 
 ### Model capabilities
 
-Unknown models default to effort-only capabilities and send
-`reasoning_effort="medium"` without `temperature`. Known entries keep their
-existing controls and supported effort levels, including temperature-only
-GPT-4o, GPT-4o Mini, GPT-5 Chat, and Claude Haiku 4.5.
+`motoro.services.model_capabilities.ModelCapabilities` describes factual support,
+independently of selected configuration. Its shared JSON contract is:
+
+| Field | Meaning |
+| --- | --- |
+| `supports_temperature`, `supports_effort` | `true` supported, `false` unsupported, `null` unknown (default) |
+| `default_temperature` | Optional advertised default, including `0.0`; `null` means unadvertised |
+| `effort_levels` | Unique accepted strings, or `null` for unknown; legacy `[]` remains valid without effort support |
+| `default_effort` | Optional advertised default; `null` is unset, literal `"none"` disables reasoning |
+| `temperature_effort_levels` | Optional allowlist: temperature requires a resolved effort in this list; `[]` forbids every mode; `null` imposes no additional restriction |
+
+Effort support does not require a known default or complete level list. Advertised
+defaults must belong to the accepted list when that list is known. Metadata for
+unsupported controls cannot advertise defaults. Unknown models now have unknown
+support and omit both parameters; `get_capabilities(model, *, default=DEFAULT_CAPABILITIES)`
+still accepts an explicit caller fallback. Registry matches take precedence.
+Only exact model IDs and dated variants inherit registry rules, avoiding accidental
+application of base-model rules to unverified variants such as `gpt-5.2-pro`.
 
 ASAREE should validate its live capability metadata with
 `motoro.services.model_capabilities.ModelCapabilities.model_validate()` and
@@ -330,6 +344,7 @@ to render the UI and carry it into execution:
 from motoro.schemas.agent import ModelConfig
 from motoro.services.llm_service import LLMService
 from motoro.services.model_capabilities import ModelCapabilities, get_capabilities
+from motoro.services.sampling import resolve_sampling
 
 # live_metadata is supplied by the product's capability discovery.
 caps = ModelCapabilities.model_validate(live_metadata)
@@ -338,9 +353,15 @@ config = ModelConfig(
     provider="openai",
     model="my-model",
     resolved_capabilities=caps,
-    effort=None,  # effort-only requests use caps.default_effort
+    temperature=None,  # unset, so advertised defaults remain visible
+    effort=None,       # distinct from effort="none"
 )
-# Render controls from config.resolved_capabilities in ASAREE's UI.
+# Use the same resolver for UI previews and effective experiment settings.
+effective = resolve_sampling(
+    caps, temperature=config.temperature, effort=config.effort, model=config.model,
+)
+wire_parameters = effective.as_kwargs()  # temperature / reasoning_effort, omitting unset values
+provenance = effective.model_dump()      # effective values, sources, omission reasons
 text, record = await LLMService().complete_text(
     config, [{"role": "user", "content": "Hello"}]
 )
@@ -355,13 +376,36 @@ each `fallback_models` entry carries its own capabilities independently.
 Supply metadata for the effective model, including any deployment mapping,
 and refresh or clear it when changing the model or provider.
 
-Effort-capable metadata must declare nonempty, unique `effort_levels` and a
-`default_effort` from that list. Levels may be provider-specific strings.
-An explicit `effort` is checked at request construction; an unsupported value
-raises `UnsupportedEffortError` (a `ValueError`) before sending a request,
-without retrying or switching to a fallback. Temperature-only models reject
-configured effort too. Models supporting both controls retain temperature-first
-behavior. Models supporting neither send neither control.
+The public resolver interface is
+`resolve_sampling(capabilities, *, temperature=None, effort=None, model="<unspecified>") -> ResolvedSampling`.
+It has no dependency on product discovery, databases, or execution schemas.
+`ResolvedSampling` contains `temperature`, `effort`, `temperature_source`,
+`effort_source`, and separate `*_omission_reason` fields. Sources are `explicit`,
+`advertised_default`, `application_fallback`, and `omitted`.
+
+Temperature resolves to explicit configuration, then the advertised default, then
+application fallback `0.5`. Effort resolves to explicit configuration, then the
+advertised default (including `"none"`), then the lowest accepted active level in
+the semantic order `minimal < low < medium < high < xhigh < max`. Provider list
+order never determines policy. Disabled `"none"` is never an automatic fallback.
+Unranked provider-specific strings can be selected explicitly or advertised as
+defaults, but are not guessed as fallbacks. Unknown accepted levels omit effort,
+unless an advertised default itself establishes an accepted value. Other explicit
+values cannot be validated against an unknown list and fail visibly.
+
+Both controls are sent when supported and compatible. A combination allowlist
+is checked against resolved effort. An explicit incompatible temperature raises
+`SamplingCombinationError`; an unset temperature in that mode stays omitted with
+reason `incompatible_effort`, without generating a temperature default. Unknown
+or unsupported temperature support omits even legacy saved temperatures.
+Unsupported explicit efforts raise `UnsupportedEffortError`, including on
+temperature-only models. Both errors subclass `SamplingConfigurationError`
+(`ValueError`) and terminate without retry or fallback. `UnsupportedEffortError`
+also remains importable from `llm_service` for existing callers.
+
+For resolved OpenRouter requests only, a validated effective effort still adds
+`allowed_openai_params=["reasoning_effort"]`, including when temperature is also
+sent. Omitted effort gets no allowance. Motoro does not enable global `drop_params`.
 
 For custom temperature-only models, pass
 `resolved_capabilities=TEMPERATURE_ONLY_CAPABILITIES`, imported from
@@ -372,8 +416,27 @@ For custom temperature-only models, pass
  "effort_levels": [], "default_effort": None}
 ```
 
-The `temperature=0.7` schema default remains available for temperature-capable
-models; effort-only requests omit it entirely.
+Compatibility: `ModelConfig.temperature` and `PartialModelConfig.temperature`
+now default to `None` and accept JSON `null`. Existing saved numeric values,
+including `0.7` and `0.0`, remain explicit through serialization and execution.
+Old capability payloads with both boolean flags, levels, and a default still
+validate. Previously fabricated unknown-model medium effort is no longer sent.
+Products should preserve missing defaults as `null` and call the shared resolver
+instead of copying its policy. No database migration is required in Motoro.
+
+Provider rules verified against official documentation on 2026-10-27:
+[OpenAI compatibility](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2)
+states original GPT-5/mini/nano reject temperature, while GPT-5.1/5.2 accept it
+only at effort `"none"`. The registry represents both controls for 5.1/5.2 with
+`temperature_effort_levels=["none"]`, and their advertised default is `"none"`
+([GPT-5.1](https://developers.openai.com/api/docs/models/gpt-5.1),
+[GPT-5.2](https://developers.openai.com/api/docs/models/gpt-5.2)). Original
+[GPT-5](https://developers.openai.com/api/docs/models/gpt-5) includes `minimal`.
+The existing curated Claude effort-only entries now record the advertised `high`
+default rather than the former suggested `medium`
+([Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort)).
+Live provider/deployment metadata takes precedence over these curated entries;
+the registry does not discover or infer other thinking modes.
 
 ### Timeouts
 
