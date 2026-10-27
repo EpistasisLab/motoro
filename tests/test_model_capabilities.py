@@ -11,6 +11,7 @@ from motoro.services import llm_service
 from motoro.services.llm_service import LLMService, UnsupportedEffortError, _sampling_kwargs
 from motoro.services.model_capabilities import (
     CATALOG,
+    DEFAULT_CAPABILITIES,
     TEMPERATURE_ONLY_CAPABILITIES,
     ModelCapabilities,
     get_capabilities,
@@ -20,6 +21,72 @@ from motoro.services.model_capabilities import (
 def test_unknown_model_defaults_to_medium_effort() -> None:
     config = ModelConfig(model="unrecognized-model")
     assert _sampling_kwargs(config, "azure_ai/unrecognized-model") == {"reasoning_effort": "medium"}
+
+
+def test_unknown_model_uses_caller_default() -> None:
+    assert get_capabilities("qwen/qwen3.8-27b") is DEFAULT_CAPABILITIES
+    assert get_capabilities("qwen/qwen3.8-27b", default=TEMPERATURE_ONLY_CAPABILITIES) is TEMPERATURE_ONLY_CAPABILITIES
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "anthropic/claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-7",
+        "claude-fable-5",
+        "claude-sonnet-5",
+        "azure_ai/claude-opus-5-20261001",
+    ],
+)
+def test_provider_default_does_not_replace_registered_claude(model: str) -> None:
+    # These registered entries share the unknown-model default singleton.
+    assert get_capabilities(model, default=TEMPERATURE_ONLY_CAPABILITIES) is DEFAULT_CAPABILITIES
+
+
+def test_registry_precedes_effort_default() -> None:
+    assert get_capabilities("openai/gpt-4o", default=DEFAULT_CAPABILITIES) is TEMPERATURE_ONLY_CAPABILITIES
+
+
+@pytest.mark.parametrize("path", ["structured", "text", "tools", "select_tool"])
+@pytest.mark.parametrize("effort,expected", [("medium", "medium"), (None, "xhigh")])
+async def test_resolved_openrouter_effort_bypasses_stale_litellm_metadata(
+    request_stubs: list[dict[str, Any]],
+    monkeypatch: pytest.MonkeyPatch,
+    path: str,
+    effort: str | None,
+    expected: str,
+) -> None:
+    async def connection(config: ModelConfig, principal_id: Any) -> dict[str, Any]:
+        return {"model": f"openrouter/{config.model}", "api_key": "stub", "api_base": None}
+
+    monkeypatch.setattr(llm_service, "_resolve_connection_for_principal", connection)
+    config = ModelConfig(
+        provider="openrouter",
+        model="qwen/qwen3.8-27b",
+        effort=effort,
+        resolved_capabilities=ModelCapabilities(
+            supports_temperature=False,
+            supports_effort=True,
+            effort_levels=["low", "medium", "xhigh"],
+            default_effort="xhigh",
+        ),
+    )
+    await invoke(LLMService(), path, config)
+    assert len(request_stubs) == 1
+    assert request_stubs[0]["reasoning_effort"] == expected
+    assert request_stubs[0]["allowed_openai_params"] == ["reasoning_effort"]
+    assert "drop_params" not in request_stubs[0]
+
+
+def test_unresolved_openrouter_effort_does_not_bypass_validation() -> None:
+    config = ModelConfig(provider="openrouter", model="unknown")
+    assert "allowed_openai_params" not in _sampling_kwargs(config, "openrouter/unknown")
+
+
+def test_resolved_openrouter_temperature_does_not_allow_effort() -> None:
+    config = ModelConfig(provider="openrouter", resolved_capabilities=TEMPERATURE_ONLY_CAPABILITIES)
+    assert _sampling_kwargs(config, "openrouter/custom") == {"temperature": 0.7}
 
 
 @pytest.mark.parametrize("model", ["gpt-4o", "gpt-4o-mini", "gpt-5-chat-latest", "claude-haiku-4-5-20251001"])
@@ -167,14 +234,23 @@ async def test_every_request_path_uses_resolved_sampling(
     await invoke(LLMService(), path, config)
     assert len(request_stubs) == 1
     assert {k: v for k, v in request_stubs[0].items() if k in {"temperature", "reasoning_effort"}} == expected
+    assert "allowed_openai_params" not in request_stubs[0]
 
 
 @pytest.mark.parametrize("path", ["structured", "text", "tools", "select_tool"])
+@pytest.mark.parametrize("provider", ["openai", "openrouter"])
 async def test_invalid_effort_never_sends_a_request_or_uses_fallback(
     request_stubs: list[dict[str, Any]],
     path: str,
+    provider: str,
 ) -> None:
-    config = ModelConfig(model="gpt-5", effort="max", fallback_models=[ModelConfig(model="gpt-4o")])
+    config = ModelConfig(
+        provider=provider,
+        model="gpt-5",
+        effort="max",
+        resolved_capabilities=get_capabilities("gpt-5"),
+        fallback_models=[ModelConfig(model="gpt-4o")],
+    )
     with pytest.raises(UnsupportedEffortError, match="max.*gpt-5"):
         await invoke(LLMService(), path, config)
     assert request_stubs == []

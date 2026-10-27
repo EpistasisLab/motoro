@@ -143,16 +143,19 @@ def _normalize(model: str) -> str:
     return m
 
 
-def get_capabilities(model: str) -> ModelCapabilities:
-    """Resolve capabilities for a model string. Unknown models default to
-    effort-only with default effort ``medium``. Known entries take precedence."""
+def get_capabilities(model: str, *, default: ModelCapabilities = DEFAULT_CAPABILITIES) -> ModelCapabilities:
+    """Resolve capabilities, using ``default`` only when no registry entry matches.
+
+    Without a caller override, unknown models use effort-only with effort ``medium``.
+    Exact and substring registry matches always take precedence over the default.
+    """
     m = _normalize(model)
     if m in _REGISTRY:
         return _REGISTRY[m]
     for key, caps in _REGISTRY.items():
         if key in m:
             return caps
-    return DEFAULT_CAPABILITIES
+    return default
 
 
 def supports_temperature(model: str) -> bool:
