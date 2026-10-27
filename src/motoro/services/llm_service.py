@@ -189,7 +189,14 @@ def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
     if caps.supports_temperature:
         return {"temperature": config.temperature}
     if caps.supports_effort:
-        return {"reasoning_effort": config.effort if config.effort is not None else caps.default_effort}
+        kwargs: dict[str, Any] = {
+            "reasoning_effort": config.effort if config.effort is not None else caps.default_effort
+        }
+        if config.resolved_capabilities is not None and model_str.startswith("openrouter/"):
+            # Live OpenRouter metadata can be newer than LiteLLM's model map.
+            # Allow only the effort we just validated, on this request alone.
+            kwargs["allowed_openai_params"] = ["reasoning_effort"]
+        return kwargs
     return {}
 
 
