@@ -1,23 +1,8 @@
-"""Per-model capability metadata — the single source of truth for which sampling
-controls a model accepts.
+"""Shared factual sampling metadata and a small curated model registry.
 
-Background: the newest adaptive-thinking Claude models (Opus 4.7, Opus 4.8, Fable 5)
-removed the sampling parameters ``temperature`` / ``top_p`` / ``top_k``. Sending an
-explicit ``temperature`` returns HTTP 400 ("temperature is deprecated for this model").
-These models are steered instead with Anthropic's ``output_config.effort`` dial
-(``low | medium | high | xhigh | max``). litellm maps the unified ``reasoning_effort``
-param onto ``output_config.effort`` for these models, so the LLM service sends
-``reasoning_effort`` at the call sites for effort-based models.
-
-This module decides, per model, whether to expose **temperature** or **effort** — and
-which effort levels are valid (``xhigh`` / ``max`` are gated per model by the provider).
-Products can resolve capabilities here or validate live metadata with
-``ModelCapabilities`` and populate ``ModelConfig.resolved_capabilities``. The UI
-and execution then share the same temperature-vs-effort decision.
-
-NOTE: litellm's own ``get_supported_openai_params`` is NOT a reliable oracle here — it
-reports ``temperature`` as supported for ``claude-opus-4-8`` even though the wire call
-400s. Hence this hand-maintained registry.
+Products can validate live metadata here and populate resolved_capabilities.
+Independent selection, fallback policy, and validation live in services.sampling.
+LiteLLM's parameter list alone cannot describe reasoning-mode restrictions.
 """
 
 from __future__ import annotations
@@ -31,39 +16,55 @@ DEFAULT_EFFORT: str = "medium"
 
 
 class ModelCapabilities(BaseModel):
-    """What sampling controls a given model accepts."""
+    """What a model accepts, independent of configuration. None means unknown.
+
+    Defaults are advertised facts, never application policy. An absent combination
+    allowlist imposes no additional restriction; it does not prove compatibility.
+    """
 
     model_config = ConfigDict(extra="forbid", revalidate_instances="always")
 
-    supports_temperature: bool = Field(
-        default=True,
-        description="Whether the model accepts an explicit `temperature`. False for "
-        "adaptive-thinking models that 400 on it (Opus 4.7/4.8, Fable 5).",
-    )
-    supports_effort: bool = Field(
-        default=False,
-        description="Whether the model accepts an `effort` dial (output_config.effort).",
-    )
-    effort_levels: list[str] = Field(
-        default_factory=list,
-        description="Valid provider-specific effort levels for this model.",
-    )
+    supports_temperature: bool | None = None
+    supports_effort: bool | None = None
+    default_temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
+    effort_levels: list[str] | None = Field(default=None, description="Accepted levels; None means unknown.")
     default_effort: str | None = Field(
         default=None,
-        description="Suggested default effort level when effort is the active control.",
+        description="Advertised provider default; None means unadvertised, 'none' disables reasoning.",
+    )
+    temperature_effort_levels: list[str] | None = Field(
+        default=None,
+        description="When supplied, temperature requires resolved effort in this allowlist. "
+        "None imposes no additional restriction; [] forbids temperature in every effort mode.",
     )
 
     @model_validator(mode="after")
     def validate_effort_metadata(self) -> ModelCapabilities:
-        if self.supports_effort:
-            if not self.effort_levels or any(not level.strip() for level in self.effort_levels):
-                raise ValueError("Effort-capable models must declare nonempty effort_levels")
-            if len(set(self.effort_levels)) != len(self.effort_levels):
-                raise ValueError("effort_levels must contain unique values")
-            if self.default_effort not in self.effort_levels:
+        for name, levels in (
+            ("effort_levels", self.effort_levels),
+            ("temperature_effort_levels", self.temperature_effort_levels),
+        ):
+            if levels is not None:
+                if any(not level.strip() or level != level.strip() for level in levels):
+                    raise ValueError(f"{name} must contain nonblank, unpadded values")
+                if len(set(levels)) != len(levels):
+                    raise ValueError(f"{name} must contain unique values")
+        if self.default_effort is not None:
+            if not self.default_effort.strip() or self.default_effort != self.default_effort.strip():
+                raise ValueError("default_effort must be nonblank and unpadded")
+            if self.effort_levels is not None and self.default_effort not in self.effort_levels:
                 raise ValueError("default_effort must be one of effort_levels")
-        elif self.effort_levels or self.default_effort is not None:
-            raise ValueError("Models without effort support cannot declare effort metadata")
+        if self.supports_effort is not True and (self.effort_levels or self.default_effort is not None):
+            raise ValueError("Effort metadata requires known effort support")
+        if self.supports_effort is True and self.effort_levels == []:
+            raise ValueError("Use effort_levels=None for unknown accepted levels")
+        if self.default_temperature is not None and self.supports_temperature is not True:
+            raise ValueError("default_temperature requires known temperature support")
+        if self.temperature_effort_levels is not None:
+            if self.supports_temperature is not True or self.supports_effort is not True:
+                raise ValueError("Combination restrictions require both controls to be supported")
+            if self.effort_levels is not None and not set(self.temperature_effort_levels) <= set(self.effort_levels):
+                raise ValueError("temperature_effort_levels must be a subset of effort_levels")
         return self
 
 
@@ -82,7 +83,7 @@ _EFFORT_ONLY = ModelCapabilities(
     supports_temperature=False,
     supports_effort=True,
     effort_levels=list(EFFORT_LEVELS_FULL),
-    default_effort=DEFAULT_EFFORT,
+    default_effort="high",
 )
 
 # Explicit override for custom temperature-only models and known registry entries.
@@ -93,39 +94,47 @@ TEMPERATURE_ONLY_CAPABILITIES = ModelCapabilities(
     default_effort=None,
 )
 
-# Unrecognized models use effort rather than sending a potentially rejected temperature.
-DEFAULT_CAPABILITIES = _EFFORT_ONLY
+# Unrecognized models have unknown support, accepted levels, and defaults.
+DEFAULT_CAPABILITIES = ModelCapabilities()
 
-# OpenAI's GPT-5 reasoning family. Effort-based like the Claude entries above, but
-# on a shorter ladder: OpenAI's ``reasoning_effort`` tops out at ``high`` (there is no
-# ``xhigh``/``max``), and its bottom rung ``minimal`` is omitted here because it falls
-# outside EFFORT_LEVELS_FULL, which effort_levels is contracted to be a subset of.
-#
-# ``supports_temperature=False`` is an approximation rather than a hard provider
-# constraint: unlike adaptive-thinking Claude, a GPT-5 model accepts temperature when
-# ``reasoning_effort`` is ``none``, so the dial is a property of the request mode as much
-# as of the model. Flattening it to effort is the honest default for a reasoning model —
-# and it's load-bearing, because _sampling_kwargs tests supports_temperature FIRST,
-# so temperature-capable entries do not send reasoning_effort.
+# Original GPT-5 supports minimal, but not the disabled reasoning mode "none".
 _OPENAI_REASONING = ModelCapabilities(
     supports_temperature=False,
     supports_effort=True,
-    effort_levels=["low", "medium", "high"],
+    effort_levels=["minimal", "low", "medium", "high"],
     default_effort=DEFAULT_EFFORT,
 )
 
+# GPT-5.1/5.2 accept temperature only with effort="none". Original GPT-5
+# rejects temperature in every mode. Official documentation: README.md.
+_OPENAI_51 = ModelCapabilities(
+    supports_temperature=True,
+    supports_effort=True,
+    effort_levels=["none", "low", "medium", "high"],
+    default_effort="none",
+    temperature_effort_levels=["none"],
+)
+_OPENAI_52 = ModelCapabilities(
+    supports_temperature=True,
+    supports_effort=True,
+    effort_levels=["none", "low", "medium", "high", "xhigh"],
+    default_effort="none",
+    temperature_effort_levels=["none"],
+)
+
 # Registry keyed by normalized (lowercase, provider-prefix-stripped) model id.
-# Substring matching covers date-suffixed / Foundry-deployed variants.
+# Dated deployment variants are also recognized.
 _REGISTRY: dict[str, ModelCapabilities] = {
     "claude-opus-5": _EFFORT_ONLY,
     "claude-opus-4-8": _EFFORT_ONLY,
     "claude-opus-4-7": _EFFORT_ONLY,
     "claude-fable-5": _EFFORT_ONLY,
     "claude-sonnet-5": _EFFORT_ONLY,
-    # Ordered BEFORE the "gpt-5" entries: gpt-5-chat is the non-reasoning
-    # sibling (temperature, no reasoning_effort), and it contains "gpt-5" as a
-    # substring, so the fallback loop below must reach it first.
+    # Chat is a distinct non-reasoning model.
     "gpt-5-chat": TEMPERATURE_ONLY_CAPABILITIES,
+    "gpt-5-chat-latest": TEMPERATURE_ONLY_CAPABILITIES,
+    "gpt-5.2": _OPENAI_52,
+    "gpt-5.1": _OPENAI_51,
     "gpt-5-mini": _OPENAI_REASONING,
     "gpt-5-nano": _OPENAI_REASONING,
     "gpt-5": _OPENAI_REASONING,
@@ -146,25 +155,27 @@ def _normalize(model: str) -> str:
 def get_capabilities(model: str, *, default: ModelCapabilities = DEFAULT_CAPABILITIES) -> ModelCapabilities:
     """Resolve capabilities, using ``default`` only when no registry entry matches.
 
-    Without a caller override, unknown models use effort-only with effort ``medium``.
-    Exact and substring registry matches always take precedence over the default.
+    Without a caller override, unknown models have unknown sampling metadata.
+    Exact and dated registry matches always take precedence over the default.
     """
     m = _normalize(model)
     if m in _REGISTRY:
         return _REGISTRY[m]
-    for key, caps in _REGISTRY.items():
-        if key in m:
-            return caps
+    for key in sorted(_REGISTRY, key=len, reverse=True):
+        # Do not apply a base model's rules to unrelated variants (e.g. -pro).
+        suffix = m.removeprefix(key)
+        if suffix != m and suffix.startswith("-") and suffix[1:5].isdigit():
+            return _REGISTRY[key]
     return default
 
 
-def supports_temperature(model: str) -> bool:
+def supports_temperature(model: str) -> bool | None:
     """True if an explicit ``temperature`` should be sent for this model."""
     return get_capabilities(model).supports_temperature
 
 
-def supports_effort(model: str) -> bool:
-    """True if this model accepts an ``effort`` dial instead of temperature."""
+def supports_effort(model: str) -> bool | None:
+    """True if this model accepts an effort dial; None if unknown."""
     return get_capabilities(model).supports_effort
 
 
@@ -178,8 +189,8 @@ def _entry(provider: str, model: str, label: str) -> ModelCatalogEntry:
 
 
 # Curated, selectable models with their capabilities — feeds the GUI's
-# temperature-vs-effort toggle and the SDK. Not exhaustive; arbitrary model strings
-# still resolve via get_capabilities (defaulting to effort-only).
+# sampling controls and the SDK. Arbitrary model strings still resolve via
+# get_capabilities (defaulting to unknown support).
 CATALOG: list[ModelCatalogEntry] = [
     _entry("anthropic", "claude-opus-5", "Claude Opus 5"),
     _entry("anthropic", "claude-opus-4-8", "Claude Opus 4.8"),

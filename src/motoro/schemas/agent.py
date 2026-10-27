@@ -49,13 +49,13 @@ class ModelConfig(BaseModel):
 
     provider: LLMProvider = LLMProvider.ANTHROPIC
     model: str = "claude-sonnet-5"
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
     effort: str | None = Field(
         default=None,
         min_length=1,
         description=(
             "Reasoning effort, validated against resolved capabilities at request construction. "
-            "When unset, effort-only models use the resolved default_effort."
+            "None means unset; the literal string 'none' disables reasoning when supported."
         ),
     )
     resolved_capabilities: ModelCapabilities | None = Field(
@@ -92,7 +92,7 @@ class PartialModelConfig(BaseModel):
 
     provider: LLMProvider | None = None
     model: str | None = None
-    temperature: float = Field(default=0.7, ge=0.0, le=2.0)
+    temperature: float | None = Field(default=None, ge=0.0, le=2.0, allow_inf_nan=False)
     effort: str | None = Field(
         default=None,
         min_length=1,
