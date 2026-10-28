@@ -438,6 +438,93 @@ default rather than the former suggested `medium`
 Live provider/deployment metadata takes precedence over these curated entries;
 the registry does not discover or infer other thinking modes.
 
+### Provider checks, listings, and defaults
+
+Use `motoro.services.providers` without a database, runtime, cache, or product
+models. Configuration is explicit; these operations never consult environment
+credentials or the inference credential resolver. The caller owns authorization,
+credential storage, rate limits, and cache policy.
+
+```python
+from motoro.services.provider_types import ProviderConfig
+from motoro.services.providers import (
+    check_connection, discover_models, get_model_metadata, get_model_defaults,
+)
+
+# Within an async function. OpenRouter listings are also public without a key.
+config = ProviderConfig(provider="openrouter", api_key="your-key")
+check = await check_connection(config)
+listing = await discover_models(config)
+metadata = get_model_metadata(model="vendor/model", listing=listing)
+defaults = get_model_defaults(model="vendor/model", listing=listing)
+if defaults.temperature.known:
+    print(defaults.temperature.value, defaults.temperature.source)
+```
+
+The runnable [independent example](examples/provider_metadata.py) uses
+`httpx.MockTransport` and makes no network requests. Both async operations accept
+`transport: httpx.AsyncBaseTransport | None = None` for deterministic testing.
+Only explicit connection checks and discovery issue requests, all GETs with a
+10-second timeout and no redirects or automatic retries. Metadata/default
+lookups are synchronous and perform no I/O. No metadata operation runs inference.
+
+`ProviderConfig` accepts `provider`, optional secret `api_key`, `api_base`, and
+`azure_project_endpoint`. Supported providers are `anthropic`, `openai`,
+`azure_foundry`, `openrouter`, and `local`. Keys are excluded from serialization
+and repr. Endpoints cannot contain URL credentials, queries, or fragments. Local
+bases include the server's API path, typically `/v1`; Azure deployment discovery
+requires the separately supplied project endpoint, not just the inference host.
+
+`discover_models(config)` returns `ModelListing(models, source, note, error)`.
+Each `ModelInfo` has `id`, `label`, existing `ModelCapabilities`, per-field
+`capability_sources`, and `ModelDefaults`. OpenAI uses the curated catalog;
+Anthropic uses paginated live metadata and falls back to the catalog on empty
+or failed discovery. OpenRouter uses its public live catalog, optionally with
+credentials. Azure uses project deployments and resolves sampling metadata by
+underlying model name. Local uses best-effort OpenAI-compatible `/models`.
+
+The listing source remains `api`, `static`, or `error`, so callers can preserve
+existing cache/fallback policy. Empty Azure deployments are a successful `api`
+listing; empty local/OpenRouter listings are `error`; empty Anthropic listings
+fall back to `static`. A structured `ProviderError(kind, http_status)` retains
+credential rejection, rate limiting, timeout, network, HTTP, malformed response,
+missing credentials, unavailable discovery, and empty-list outcomes, including
+when a catalog fallback succeeds. Error text never includes raw response bodies
+or provider exception strings. A caller can retain `error` and `note` alongside
+a cached listing; Motoro implements no cache or stale-fallback policy.
+
+`check_connection(config)` returns `ConnectionCheck(status, detail, endpoint,
+models, error)`, with `ok`, `failed`, or `unknown`. Accepted keys do not establish
+quota or billing readiness. Direct Anthropic/OpenAI/OpenRouter rate limits are
+inconclusive. Azure and local reuse discovery: unavailable Azure project
+configuration and unsupported local listings are inconclusive; Azure discovery
+failures fail the check. Successful Azure checks return the exact deployments
+used for the check so a caller can seed its own cache.
+
+`get_model_metadata(model=..., listing=...)` prefers a matching listing entry,
+then the existing registry. Unknown model fields remain `None`. Check the
+supplied listing's `error`/`note` separately: metadata lookup does not erase its
+failure or establish whether that model is accessible to the credential.
+`get_model_defaults` projects the existing capability defaults into
+`temperature` and `effort`; other explicitly advertised defaults are in
+`additional`. Each `DefaultValue` exposes `value`, `source` (`provider`,
+`catalog`, or `unknown`), and the Python property `known`. In serialized JSON,
+`value: null, source: unknown` denotes unknown; `0`, `false`, `""`, `[]`, and
+`{}` remain known values. Limits such as context size are not invented output
+token defaults. Application preferences and overrides still belong in
+`ModelConfig` and `resolve_sampling`, separately from these facts.
+
+For inference adapters, `get_inference_connection(config, model=...)` returns
+the existing `motoro.services.credentials.Connection` dictionary, including
+Foundry endpoint normalization and the Azure/local LiteLLM routing prefixes.
+Return it from a caller-owned credential resolver; it deliberately contains
+the secret key and must never be serialized to browser responses or logs.
+Pass `metadata.capabilities` as `ModelConfig.resolved_capabilities` to use the
+same provider facts during inference. For tri-state tool support, use
+`motoro.services.llm_service.model_tool_calling_support(provider, model)`;
+unknown models return `None`. The existing execution-pattern boolean helper
+continues to treat unknown support conservatively as false.
+
 ### Timeouts
 
 `llm_call_timeout_seconds` (default 120) caps a single completion attempt, and
