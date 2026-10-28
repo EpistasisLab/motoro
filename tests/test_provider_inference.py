@@ -86,7 +86,11 @@ async def test_live_capabilities_feed_existing_inference_sampling() -> None:
     "provider,base,model,key",
     [
         ("azure_foundry", "resource", "azure_ai/chat", "key"),
+        ("azure_foundry", "resource/", "azure_ai/chat", "key"),
+        ("azure_foundry", " resource/// ", "azure_ai/chat", "key"),
+        ("azure_foundry", "resource/anthropic/", "azure_ai/chat", "key"),
         ("azure_foundry", "https://resource.services.ai.azure.com/anthropic", "azure_ai/chat", "key"),
+        ("azure_foundry", "https://resource.services.ai.azure.com/anthropic/", "azure_ai/chat", "key"),
         ("local", "http://localhost:8080/v1", "openai/chat", None),
         ("openrouter", None, None, "key"),
     ],
@@ -99,6 +103,13 @@ def test_explicit_inference_connection(provider: str, base: str | None, model: s
     assert connection["api_version"] is None
     if provider == "azure_foundry":
         assert connection["api_base"] == "https://resource.services.ai.azure.com"
+
+
+def test_azure_trailing_slash_resource_inference_regression() -> None:
+    config = ProviderConfig(provider="azure_foundry", api_base="my-resource/")
+    connection = get_inference_connection(config, model="prod-chat")
+    assert connection["api_base"] == "https://my-resource.services.ai.azure.com"
+    assert connection["model"] == "azure_ai/prod-chat"
 
 
 @pytest.mark.parametrize("provider", ["azure_foundry", "local"])

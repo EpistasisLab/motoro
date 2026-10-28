@@ -315,6 +315,45 @@ async def test_echoed_credentials_are_redacted_in_metadata() -> None:
     assert KEY not in result.model_dump_json()
 
 
+@pytest.mark.parametrize("resource", ["my-resource/", " my-resource/// ", "my-resource/anthropic/"])
+async def test_azure_resource_name_without_project_stays_inconclusive(resource: str) -> None:
+    def fail(request: httpx.Request) -> httpx.Response:
+        pytest.fail("An Azure check without a project endpoint must not make a request")
+
+    config = ProviderConfig(provider="azure_foundry", api_base=resource, api_key=KEY)
+    result = await check_connection(config, transport=httpx.MockTransport(fail))
+    assert result.status == "unknown"
+    assert result.endpoint == resource
+    assert result.error is not None and result.error.kind == "unavailable"
+    assert KEY not in config.model_dump_json() + repr(config) + result.model_dump_json()
+
+
+@pytest.mark.parametrize(
+    "base",
+    [
+        "https://user:pass@example.test/anthropic/",
+        "https://example.test?key=secret",
+        "https://example.test/#secret",
+        f"https://example.test/{KEY}",
+        "my-resource/other-path",
+        "//example.test/",
+        "ftp://example.test/",
+        "my-resource?secret=value",
+        "my-resource#secret",
+        "user@my-resource/",
+    ],
+)
+def test_azure_normalization_preserves_endpoint_validation(base: str) -> None:
+    with pytest.raises(ValidationError) as exc:
+        ProviderConfig(provider="azure_foundry", api_base=base, api_key=KEY)
+    assert KEY not in str(exc.value)
+
+
+def test_azure_project_endpoint_must_still_be_a_url() -> None:
+    with pytest.raises(ValidationError):
+        ProviderConfig(provider="azure_foundry", api_base="my-resource/", azure_project_endpoint="my-project/")
+
+
 @pytest.mark.parametrize(
     "base",
     [

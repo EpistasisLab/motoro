@@ -7,6 +7,7 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
 
+from motoro.services.credentials import foundry_api_base
 from motoro.services.model_capabilities import ModelCapabilities
 
 type Provenance = Literal["provider", "catalog", "unknown"]
@@ -46,8 +47,13 @@ class ProviderConfig(BaseModel):
                 continue
             if key and key in value:
                 raise ValueError("Credentials must be supplied separately from endpoints")
-            if name == "api_base" and self.provider == "azure_foundry" and ":" not in value and "/" not in value:
-                continue
+            if name == "api_base" and self.provider == "azure_foundry":
+                # Validate the same normalized endpoint inference uses, while
+                # retaining the supplied value for inconclusive check results.
+                normalized = foundry_api_base(value)
+                if not value.strip().startswith(("http://", "https://")) and urlsplit(normalized).path:
+                    raise ValueError("Azure resource names must resolve to a host without a path")
+                value = normalized
             parts = urlsplit(value)
             if (
                 parts.scheme not in {"http", "https"}
