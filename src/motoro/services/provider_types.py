@@ -90,9 +90,11 @@ class DefaultValue(BaseModel):
 
 
 class ModelDefaults(BaseModel):
-    """Sampling defaults project existing capability fields, never app policy.
+    """Advertised defaults, falling back to curated capability defaults.
 
-    Other advertised defaults are in additional. Token limits are not defaults.
+    Provider facts remain known independently of sampling support/validation.
+    Other advertised defaults are in additional. Token limits are not defaults;
+    application preferences are separate.
     """
 
     temperature: DefaultValue = Field(default_factory=DefaultValue)

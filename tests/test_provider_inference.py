@@ -82,6 +82,32 @@ async def test_live_capabilities_feed_existing_inference_sampling() -> None:
     assert metadata.defaults.temperature.value == 0
 
 
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+async def test_independent_defaults_do_not_change_effective_sampling(provider: str) -> None:
+    entry = (
+        {"id": "new/model", "default_parameters": {"temperature": 0}}
+        if provider == "openrouter"
+        else {
+            "id": "new/model",
+            "capabilities": {"temperature": {"default": 0}},
+        }
+    )
+    mock = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [entry]}))
+    listing = await discover_models(ProviderConfig(provider=provider, api_key="example-only"), transport=mock)
+    metadata = get_model_metadata(model="new/model", listing=listing)
+    cfg = ModelConfig(provider=provider, model=metadata.id, resolved_capabilities=metadata.capabilities)
+    assert metadata.defaults.temperature.known and metadata.defaults.temperature.value == 0
+    assert metadata.capabilities.supports_temperature is None
+    assert metadata.capabilities.default_temperature is None
+    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model") == {}
+    cfg.temperature = 0.5
+    # Existing policy omits controls whose support is unknown, even with an
+    # application preference. Retrieving a default must not change that policy.
+    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model") == {}
+    assert cfg.temperature == 0.5
+    assert get_model_metadata(model="new/model", listing=listing).defaults.temperature.value == 0
+
+
 @pytest.mark.parametrize(
     "provider,base,model,key",
     [

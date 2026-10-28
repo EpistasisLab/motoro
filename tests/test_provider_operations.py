@@ -307,6 +307,88 @@ async def test_partial_temperature_metadata_does_not_erase_independent_facts() -
         assert result.models[0].defaults.temperature.source == "provider"
 
 
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+@pytest.mark.parametrize("support", [None, False, True])
+async def test_advertised_defaults_survive_partial_support_metadata(provider: str, support: bool | None) -> None:
+    if provider == "openrouter":
+        entry: dict[str, Any] = {"id": "new/model", "default_parameters": {"temperature": 0}}
+        if support is not None:
+            entry["supported_parameters"] = ["temperature"] if support else []
+    else:
+        temperature: dict[str, Any] = {"default": 0}
+        if support is not None:
+            temperature["supported"] = support
+        entry = {"id": "new/model", "capabilities": {"temperature": temperature}}
+    listing = await discover_models(config(provider), transport=transport(payload={"data": [entry]}))
+    assert listing.source == "api" and listing.error is None
+    metadata = get_model_metadata(model="new/model", listing=listing)
+    defaults = get_model_defaults(model="new/model", listing=listing)
+    for info in [listing.models[0], metadata]:
+        assert info.capabilities.supports_temperature is support
+        assert info.capabilities.default_temperature == (0 if support is True else None)
+        assert info.defaults == defaults
+    assert defaults.temperature.value == 0
+    assert defaults.temperature.source == "provider" and defaults.temperature.known
+    assert not defaults.effort.known and defaults.effort.source == "unknown"
+    assert ModelListing.model_validate_json(listing.model_dump_json()) == listing
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+async def test_advertised_effort_default_survives_missing_ladder(provider: str) -> None:
+    entry = {"id": "new/model"}
+    if provider == "openrouter":
+        entry["reasoning"] = {"default_effort": "high"}
+    else:
+        entry["capabilities"] = {"effort": {"default_effort": "high"}}
+    listing = await discover_models(config(provider), transport=transport(payload={"data": [entry]}))
+    metadata = get_model_metadata(model="new/model", listing=listing)
+    defaults = get_model_defaults(model="new/model", listing=listing)
+    assert listing.source == "api" and metadata.capabilities.default_effort is None
+    assert metadata.capabilities.effort_levels is None
+    assert metadata.defaults == defaults
+    assert defaults.effort.known and defaults.effort.value == "high" and defaults.effort.source == "provider"
+    assert not defaults.temperature.known
+
+
+@pytest.mark.parametrize("value", [0, False, "", [], {}, None])
+async def test_partial_metadata_retains_falsey_provider_defaults(value: Any) -> None:
+    listing = await discover_models(
+        config("openrouter"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "new/model",
+                        "default_parameters": {"temperature": 0, "advertised": value},
+                    }
+                ]
+            }
+        ),
+    )
+    defaults = get_model_defaults(model="new/model", listing=listing)
+    assert defaults.temperature.known and defaults.temperature.value == 0
+    additional = defaults.additional["advertised"]
+    assert additional.value == value and type(additional.value) is type(value)
+    assert additional.known is (value is not None)
+    assert additional.source == ("provider" if value is not None else "unknown")
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+async def test_missing_and_null_provider_defaults_remain_unknown(provider: str) -> None:
+    entry: dict[str, Any] = {"id": "new/model"}
+    if provider == "openrouter":
+        entry.update(default_parameters={"temperature": None}, reasoning={"default_effort": None})
+    else:
+        entry["capabilities"] = {"temperature": {"default": None}, "effort": {"default_effort": None}}
+    listing = await discover_models(config(provider), transport=transport(payload={"data": [entry, {"id": "missing"}]}))
+    for model in ["new/model", "missing"]:
+        defaults = get_model_defaults(model=model, listing=listing)
+        assert defaults.temperature.value is None and not defaults.temperature.known
+        assert defaults.temperature.source == "unknown"
+        assert defaults.effort.value is None and not defaults.effort.known
+        assert defaults.effort.source == "unknown"
+
+
 async def test_echoed_credentials_are_redacted_in_metadata() -> None:
     result = await discover_models(
         config("openrouter"),

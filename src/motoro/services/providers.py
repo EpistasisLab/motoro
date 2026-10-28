@@ -196,6 +196,7 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
     if provider == "local":
         return _model(model)
     advertised: set[str] = set()
+    provider_defaults: dict[str, Any] = {}
     additional: dict[str, Any] = {}
     if provider == "anthropic":
         raw = entry.get("capabilities") or {}
@@ -206,10 +207,12 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
             advertised.update({"supports_effort", "effort_levels"})
         if "default_effort" in effort:
             advertised.add("default_effort")
+            provider_defaults["effort"] = effort["default_effort"]
         if "supported" in temperature:
             advertised.add("supports_temperature")
         if "default" in temperature:
             advertised.add("default_temperature")
+            provider_defaults["temperature"] = temperature["default"]
         label = entry.get("display_name")
     else:
         caps = _capabilities_from_openrouter(entry)
@@ -222,12 +225,21 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
             advertised.add("effort_levels")
         if "default_effort" in reasoning:
             advertised.add("default_effort")
+            provider_defaults["effort"] = reasoning["default_effort"]
         defaults = entry.get("default_parameters") or {}
         if "temperature" in defaults:
             advertised.add("default_temperature")
+            provider_defaults["temperature"] = defaults["temperature"]
         additional = {k: v for k, v in defaults.items() if k != "temperature"}
         label = entry.get("name")
-    return _model(model, label, capabilities=caps, advertised=advertised, additional=additional)
+    info = _model(model, label, capabilities=caps, advertised=advertised, additional=additional)
+    # Advertised facts survive independently of capability validation. Keep
+    # the constrained capability defaults unchanged for sampling/inference.
+    if "temperature" in provider_defaults:
+        info.defaults.temperature = _default(provider_defaults["temperature"], "provider")
+    if "effort" in provider_defaults:
+        info.defaults.effort = _default(provider_defaults["effort"], "provider")
+    return info
 
 
 def _entries(payload: Any, field: str) -> list[dict[str, Any]]:

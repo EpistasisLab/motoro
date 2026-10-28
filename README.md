@@ -505,8 +505,10 @@ used for the check so a caller can seed its own cache.
 then the existing registry. Unknown model fields remain `None`. Check the
 supplied listing's `error`/`note` separately: metadata lookup does not erase its
 failure or establish whether that model is accessible to the credential.
-`get_model_defaults` projects the existing capability defaults into
-`temperature` and `effort`; other explicitly advertised defaults are in
+`get_model_defaults` retains explicitly advertised defaults independently of
+sampling support metadata, using curated capability defaults as a fallback.
+An advertised default does not establish support or change inference settings.
+The shared fields are `temperature` and `effort`; other advertised defaults are in
 `additional`. Each `DefaultValue` exposes `value`, `source` (`provider`,
 `catalog`, or `unknown`), and the Python property `known`. In serialized JSON,
 `value: null, source: unknown` denotes unknown; `0`, `false`, `""`, `[]`, and
