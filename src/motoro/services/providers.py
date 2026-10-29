@@ -6,6 +6,8 @@ baseline 10 second timeout and redirects are disabled to protect auth headers.
 """
 
 import json
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
@@ -33,11 +35,22 @@ _BASES = {
     "openrouter": "https://openrouter.ai/api/v1",
 }
 NO_PROJECT_ENDPOINT_NOTE = (
-    "This credential has no Project endpoint, so its deployments can't be listed -- enter your deployment's "
-    "name directly in the Model field below, or edit the credential to add a Project endpoint "
-    "(https://{resource}.services.ai.azure.com/api/projects/{project})."
+    "Azure deployment discovery requires a Project endpoint "
+    "(https://{resource}.services.ai.azure.com/api/projects/{project}). "
+    "Deployment names can still be supplied explicitly for inference."
 )
-_LOCAL_NOTE = "This server didn't return a model list -- type the model's name directly in the Model field below."
+_LOCAL_NOTE = "The server did not return a model list. Model names can still be supplied explicitly for inference."
+
+
+@asynccontextmanager
+async def _provider_client(
+    client: httpx.AsyncClient | None, transport: httpx.AsyncBaseTransport | None
+) -> AsyncIterator[httpx.AsyncClient]:
+    if client is not None:
+        yield client
+    else:
+        async with httpx.AsyncClient(transport=transport) as owned_client:
+            yield owned_client
 
 
 def _key(config: ProviderConfig) -> str:
@@ -233,19 +246,24 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
         additional = {k: v for k, v in defaults.items() if k != "temperature"}
         label = entry.get("name")
     info = _model(model, label, capabilities=caps, advertised=advertised, additional=additional)
-    # Advertised facts survive independently of capability validation. Keep
-    # the constrained capability defaults unchanged for sampling/inference.
-    if "temperature" in provider_defaults:
-        info.defaults.temperature = _default(provider_defaults["temperature"], "provider")
-    if "effort" in provider_defaults:
-        info.defaults.effort = _default(provider_defaults["effort"], "provider")
+    # Defaults are facts independent of capability validation. Provider values
+    # (including explicit nulls) override catalog facts; inference stays constrained.
+    catalog = get_capabilities(model)
+    info.defaults.temperature = _default(
+        provider_defaults.get("temperature", catalog.default_temperature),
+        "provider" if "temperature" in provider_defaults else "catalog",
+    )
+    info.defaults.effort = _default(
+        provider_defaults.get("effort", catalog.default_effort),
+        "provider" if "effort" in provider_defaults else "catalog",
+    )
     return info
 
 
 def _entries(payload: Any, field: str) -> list[dict[str, Any]]:
     if not isinstance(payload, dict):
         raise ValueError("Invalid model listing")
-    entries = payload.get(field) or []
+    entries = payload.get(field)
     if not isinstance(entries, list) or any(not isinstance(entry, dict) for entry in entries):
         raise ValueError("Invalid model listing")
     return entries
@@ -255,13 +273,18 @@ async def discover_models(
     config: ProviderConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> ModelListing:
     """List selectable models/deployments, preserving provider-specific policy.
 
     OpenAI is curated, Anthropic falls back to the catalog, OpenRouter is
     public, Azure requires a project endpoint, and local discovery is best effort.
     No implicit environment credentials, retries, caches or inference calls.
+    An optional client is caller-owned and remains open. Pass client or transport,
+    not both. Requests always override client timeouts, redirects and auth.
     """
+    if client is not None and transport is not None:
+        raise ValueError("Pass either client or transport, not both")
     provider = config.provider
     if provider == "openai":
         return ModelListing(models=_catalog(provider), source="static")
@@ -271,7 +294,7 @@ async def discover_models(
         if not config.api_base:
             return ModelListing(
                 source="error",
-                note="Set up a credential with a resource name first.",
+                note="Azure deployment discovery requires an inference resource name or base URL.",
                 error=ProviderError(kind="unavailable"),
             )
         if not config.azure_project_endpoint:
@@ -285,7 +308,7 @@ async def discover_models(
     if provider == "local" and not config.api_base:
         return ModelListing(
             source="error",
-            note="Set up a credential with your server's base URL first.",
+            note="Local model discovery requires a server base URL.",
             error=ProviderError(kind="unavailable"),
         )
     base = (config.api_base or _BASES.get(provider, "")).rstrip("/")
@@ -294,12 +317,14 @@ async def discover_models(
         url = _models_url(base) if provider == "anthropic" else f"{base}/models"
     try:
         entries: list[dict[str, Any]] = []
-        async with httpx.AsyncClient(timeout=10.0, transport=transport, follow_redirects=False) as client:
+        async with _provider_client(client, transport) as request_client:
             params: dict[str, str | int] = {"api-version": "v1"} if provider == "azure_foundry" else {}
             if provider == "anthropic":
                 params = {"limit": 100}
             for _ in range(10 if provider == "anthropic" else 1):
-                response = await client.get(url, params=params, headers=_headers(config))
+                response = await request_client.get(
+                    url, params=params, headers=_headers(config), timeout=10.0, follow_redirects=False, auth=None
+                )
                 response.raise_for_status()
                 # Scrub an echoed credential before interpreting *any* metadata.
                 payload = _redact_payload(json.loads(response.text), _key(config))
@@ -316,14 +341,13 @@ async def discover_models(
                 models=_catalog(provider),
                 source="static",
                 error=error,
-                note=f"Couldn't reach Anthropic to list models ({message}), so this is the built-in catalog. "
-                "You can still type any model name directly in the Model field.",
+                note=f"Anthropic model discovery failed ({message}). Returning the built-in catalog.",
             )
         note = {
             "local": _LOCAL_NOTE,
             "azure_foundry": f"Could not reach the Azure Foundry project to list deployments: {message}",
-            "openrouter": f"Couldn't reach OpenRouter to list models ({message}). You can still type any model id "
-            "directly in the Model field.",
+            "openrouter": f"OpenRouter model discovery failed ({message}). "
+            "Model IDs can still be supplied explicitly for inference.",
         }[provider]
         return ModelListing(source="error", note=note, error=error)
     if not models:
@@ -333,7 +357,7 @@ async def discover_models(
             note = (
                 _LOCAL_NOTE
                 if provider == "local"
-                else ("OpenRouter returned no models. You can still type any model id directly.")
+                else "OpenRouter returned no models. Model IDs can still be supplied explicitly for inference."
             )
             return ModelListing(source="error", note=note, error=ProviderError(kind="empty"))
     if provider != "anthropic":
@@ -345,23 +369,29 @@ async def check_connection(
     config: ProviderConfig,
     *,
     transport: httpx.AsyncBaseTransport | None = None,
+    client: httpx.AsyncClient | None = None,
 ) -> ConnectionCheck:
-    """Explicit zero-token check. Acceptance does not verify quota or billing."""
+    """Explicit zero-token check. Acceptance does not verify quota or billing.
+
+    An optional client is caller-owned and remains open. Pass client or transport,
+    not both. Requests always override client timeouts, redirects and auth.
+    """
+    if client is not None and transport is not None:
+        raise ValueError("Pass either client or transport, not both")
     provider = config.provider
     if provider == "azure_foundry" and not config.azure_project_endpoint:
         return ConnectionCheck(
             status="unknown",
             endpoint=config.api_base,
             error=ProviderError(kind="unavailable"),
-            detail="This credential has no Project endpoint, so it can't be checked for free. Add one to enable "
-            "deployment listing, or test it with a real run.",
+            detail="A Project endpoint is required to check Azure connectivity without running inference.",
         )
     if provider == "local" and not config.api_base:
         return ConnectionCheck(
             status="unknown",
             endpoint=None,
             error=ProviderError(kind="unavailable"),
-            detail="This credential has no base URL, so it can't be checked.",
+            detail="A server base URL is required to check local connectivity.",
         )
     if not _key(config) and provider != "local":
         return ConnectionCheck(
@@ -371,7 +401,7 @@ async def check_connection(
             detail="No credential supplied for this provider.",
         )
     if provider in {"azure_foundry", "local"}:
-        listing = await discover_models(config, transport=transport)
+        listing = await discover_models(config, transport=transport, client=client)
         endpoint = config.azure_project_endpoint if provider == "azure_foundry" else config.api_base
         if listing.source == "api":
             detail = (
@@ -393,8 +423,10 @@ async def check_connection(
         )
     url = _models_url(config.api_base or _BASES[provider])
     try:
-        async with httpx.AsyncClient(timeout=10.0, transport=transport, follow_redirects=False) as client:
-            response = await client.get(url, headers=_headers(config))
+        async with _provider_client(client, transport) as request_client:
+            response = await request_client.get(
+                url, headers=_headers(config), timeout=10.0, follow_redirects=False, auth=None
+            )
         if response.is_success:
             return ConnectionCheck(
                 status="ok",

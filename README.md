@@ -464,6 +464,20 @@ if defaults.temperature.known:
 The runnable [independent example](examples/provider_metadata.py) uses
 `httpx.MockTransport` and makes no network requests. Both async operations accept
 `transport: httpx.AsyncBaseTransport | None = None` for deterministic testing.
+For connection pooling across operations, pass `client: httpx.AsyncClient` instead:
+
+```python
+import httpx
+
+async with httpx.AsyncClient() as client:
+    check = await check_connection(config, client=client)
+    listing = await discover_models(config, client=client)
+```
+
+The caller owns and closes the supplied client. `client` and `transport` are
+mutually exclusive. Each request overrides the client's timeout, redirect policy,
+and default authentication; credentials come from `ProviderConfig`. Use a dedicated
+client without unrelated default headers, cookies, or query parameters.
 Only explicit connection checks and discovery issue requests, all GETs with a
 10-second timeout and no redirects or automatic retries. Metadata/default
 lookups are synchronous and perform no I/O. No metadata operation runs inference.
@@ -471,8 +485,9 @@ lookups are synchronous and perform no I/O. No metadata operation runs inference
 `ProviderConfig` accepts `provider`, optional secret `api_key`, `api_base`, and
 `azure_project_endpoint`. Supported providers are `anthropic`, `openai`,
 `azure_foundry`, `openrouter`, and `local`. Keys are excluded from serialization
-and repr. Endpoints cannot contain URL credentials, queries, or fragments. Local
-bases include the server's API path, typically `/v1`; Azure deployment discovery
+and repr. Endpoints must have valid ports and cannot contain URL credentials,
+queries, or fragments. Local bases include the server's API path, typically
+`/v1`; Azure deployment discovery
 requires the separately supplied project endpoint, not just the inference host.
 
 `discover_models(config)` returns `ModelListing(models, source, note, error)`.
@@ -485,8 +500,9 @@ underlying model name. Local uses best-effort OpenAI-compatible `/models`.
 
 The listing source remains `api`, `static`, or `error`, so callers can preserve
 existing cache/fallback policy. Empty Azure deployments are a successful `api`
-listing; empty local/OpenRouter listings are `error`; empty Anthropic listings
-fall back to `static`. A structured `ProviderError(kind, http_status)` retains
+listing; malformed or missing list fields remain errors. Empty local/OpenRouter
+listings are `error`; empty Anthropic listings fall back to `static`.
+A structured `ProviderError(kind, http_status)` retains
 credential rejection, rate limiting, timeout, network, HTTP, malformed response,
 missing credentials, unavailable discovery, and empty-list outcomes, including
 when a catalog fallback succeeds. Error text never includes raw response bodies
@@ -507,6 +523,8 @@ supplied listing's `error`/`note` separately: metadata lookup does not erase its
 failure or establish whether that model is accessible to the credential.
 `get_model_defaults` retains explicitly advertised defaults independently of
 sampling support metadata, using curated capability defaults as a fallback.
+Omitted defaults fall back to the catalog even when a live capability ladder
+excludes that default; an explicitly advertised `null` remains unknown.
 An advertised default does not establish support or change inference settings.
 The shared fields are `temperature` and `effort`; other advertised defaults are in
 `additional`. Each `DefaultValue` exposes `value`, `source` (`provider`,

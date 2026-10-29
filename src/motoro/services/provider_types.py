@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Literal
 from urllib.parse import urlsplit
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, SecretStr, model_validator
 
 from motoro.services.credentials import foundry_api_base
@@ -55,6 +56,12 @@ class ProviderConfig(BaseModel):
                     raise ValueError("Azure resource names must resolve to a host without a path")
                 value = normalized
             parts = urlsplit(value)
+            try:
+                # urllib checks port range; HTTPX checks the URL it will actually use.
+                _ = parts.port
+                httpx.URL(value)
+            except (ValueError, httpx.InvalidURL):
+                raise ValueError("Endpoints must be valid HTTP URLs with ports between 0 and 65535") from None
             if (
                 parts.scheme not in {"http", "https"}
                 or not parts.hostname

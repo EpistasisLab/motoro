@@ -80,6 +80,55 @@ async def test_transport_failures_are_safe_and_distinct(
     assert KEY not in listing.model_dump_json() + check.model_dump_json() + caplog.text
 
 
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("status", [200, 302, 503])
+async def test_caller_owned_client_is_reused_with_request_protections(provider: str, status: int) -> None:
+    calls: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        assert request.extensions["timeout"] == {"connect": 10.0, "read": 10.0, "write": 10.0, "pool": 10.0}
+        expected_auth = None if provider in {"anthropic", "azure_foundry"} else f"Bearer {KEY}"
+        assert request.headers.get("authorization") == expected_auth
+        return httpx.Response(
+            status,
+            headers={"Location": "https://redirect.test/models"},
+            json={"data": [{"id": "m"}], "value": [{"name": "deployment"}]},
+        )
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(respond),
+        timeout=0.01,
+        follow_redirects=True,
+        auth=httpx.BasicAuth("unrelated", "credential"),
+    ) as client:
+        check = await check_connection(config(provider), client=client)
+        assert not client.is_closed
+        listing = await discover_models(config(provider), client=client)
+        assert not client.is_closed
+        assert check.status == ("ok" if status == 200 else "unknown" if provider == "local" else "failed")
+        assert listing.source == (
+            "static"
+            if provider == "openai" or provider == "anthropic" and status != 200
+            else "api"
+            if status == 200
+            else "error"
+        )
+        # No redirect followups, and the Azure/local check delegates through this client.
+        assert len(calls) == (1 if provider == "openai" else 2)
+    assert client.is_closed
+
+
+@pytest.mark.parametrize("operation", ["check", "discover"])
+async def test_client_and_transport_are_mutually_exclusive(operation: str) -> None:
+    mock = transport(payload={"data": []})
+    async with httpx.AsyncClient(transport=mock) as client:
+        call = check_connection if operation == "check" else discover_models
+        with pytest.raises(ValueError, match="either client or transport"):
+            await call(config("openai"), transport=mock, client=client)
+        assert not client.is_closed
+
+
 @pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
 @pytest.mark.parametrize(
     "code,kind", [(401, "credential_rejected"), (403, "credential_rejected"), (429, "rate_limited"), (503, "http")]
@@ -280,6 +329,76 @@ async def test_malformed_metadata_is_normalized(provider: str, payload: Any) -> 
     result = await discover_models(config(provider), transport=transport(payload=payload))
     assert result.error is not None and result.error.kind == "invalid_response"
     assert result.source == ("static" if provider == "anthropic" else "error")
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {},
+        {"error": "bad schema"},
+        {"data": None, "value": None},
+        {"data": False, "value": False},
+        {"data": 0, "value": 0},
+        {"data": "", "value": ""},
+        {"data": {}, "value": {}},
+    ],
+)
+async def test_missing_or_falsey_listing_fields_are_invalid(provider: str, payload: Any) -> None:
+    # A top-level error object and malformed collection fields are not empty lists.
+    result = await discover_models(config(provider), transport=transport(payload=payload))
+    assert result.error is not None and result.error.kind == "invalid_response"
+    if provider == "azure_foundry":
+        check = await check_connection(config(provider), transport=transport(payload=payload))
+        assert check.status == "failed"
+        assert check.error is not None and check.error.kind == "invalid_response"
+
+
+@pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
+@pytest.mark.parametrize("advertised", ["missing", "high", None])
+async def test_partial_metadata_preserves_catalog_defaults(provider: str, advertised: str | None) -> None:
+    model = "openai/gpt-5" if provider == "openrouter" else "claude-opus-5"
+    effort: dict[str, Any] = (
+        {"supported_efforts": ["low"]} if provider == "openrouter" else {"supported": True, "low": {"supported": True}}
+    )
+    if advertised != "missing":
+        effort["default_effort"] = advertised
+    entry = (
+        {"id": model, "reasoning": effort}
+        if provider == "openrouter"
+        else {"id": model, "capabilities": {"effort": effort}}
+    )
+    listing = await discover_models(config(provider), transport=transport(payload={"data": [entry]}))
+    assert listing.source == "api"
+    info = get_model_metadata(model=model, listing=listing)
+    default = info.defaults.effort
+    assert default.value == (get_capabilities(model).default_effort if advertised == "missing" else advertised)
+    assert default.source == ("catalog" if advertised == "missing" else "unknown" if advertised is None else "provider")
+    # The catalog default is outside the advertised ladder; inference must still omit it.
+    assert info.capabilities.default_effort is None
+    assert info.capabilities.effort_levels == ["low"]
+
+
+async def test_openrouter_support_metadata_preserves_catalog_default() -> None:
+    listing = await discover_models(
+        config("openrouter"),
+        transport=transport(payload={"data": [{"id": "openai/gpt-5", "supported_parameters": ["reasoning_effort"]}]}),
+    )
+    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.value == "medium"
+    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.source == "catalog"
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("endpoint_field", ["api_base", "azure_project_endpoint"])
+@pytest.mark.parametrize("port", ["abc", "-1", "65536"])
+def test_endpoint_ports_are_validated(provider: str, endpoint_field: str, port: str) -> None:
+    with pytest.raises(ValidationError):
+        config(provider, **{endpoint_field: f"https://example.test:{port}/v1"})
+
+
+@pytest.mark.parametrize("base", ["https://example.test:0/v1", "https://example.test:65535/v1", "http://[::1]:8080/v1"])
+def test_valid_endpoint_ports(base: str) -> None:
+    assert config("local", api_base=base).api_base == base
 
 
 async def test_missing_metadata_keeps_curated_facts_and_unknowns() -> None:
