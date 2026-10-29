@@ -2,8 +2,14 @@
 
 ## Branches and pull requests
 
-`develop` is the default branch. It collects completed changes for integration
-testing before a release. `main` holds code promoted for release.
+`main` is the default branch and holds the latest released code. `develop`
+collects completed changes for integration testing before the next release.
+Default-branch selection does not change where feature work belongs.
+
+GitHub initially suggests `main` as the PR base. Explicitly select `develop`
+for feature, fix, and documentation PRs. With the GitHub CLI, use
+`gh pr create --base develop`. Reserve PRs into `main` for release promotion
+and production hotfixes.
 
 | Branch | Start from | PR target | Merge method |
 | --- | --- | --- | --- |

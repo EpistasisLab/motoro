@@ -148,7 +148,8 @@ motoro = { git = "https://github.com/EpistasisLab/motoro.git", tag = "v0.2.0" }
 
 Pin by tag (semver, against core's public surface), not a raw commit SHA.
 
-Feature PRs target `develop`; tested release batches are promoted to `main`.
+`main` is the default branch and contains the latest released code. Feature PRs
+explicitly target `develop`; tested release batches are promoted to `main`.
 See [Contributing and releasing](CONTRIBUTING.md) for branch roles, protections,
 merge methods, dependent-product validation, tagging, and hotfixes.
 
