@@ -17,7 +17,7 @@ from motoro.services._provider_capabilities import (
     _capabilities_from_openrouter,
 )
 from motoro.services.credentials import Connection, foundry_api_base
-from motoro.services.model_capabilities import CATALOG, ModelCapabilities, get_capabilities
+from motoro.services.model_capabilities import ModelCapabilities
 from motoro.services.provider_types import (
     ConnectionCheck,
     DefaultValue,
@@ -110,9 +110,9 @@ def _model(
     advertised: set[str] | None = None,
     additional: dict[str, Any] | None = None,
 ) -> ModelInfo:
-    caps = capabilities if capabilities is not None else get_capabilities(model).model_copy(deep=True)
+    caps = capabilities if capabilities is not None else ModelCapabilities()
     sources: dict[str, Provenance] = {
-        field: "unknown" if value is None else "provider" if field in (advertised or set()) else "catalog"
+        field: "provider" if value is not None and field in (advertised or set()) else "unknown"
         for field, value in caps.model_dump().items()
     }
     return ModelInfo(
@@ -128,14 +128,6 @@ def _model(
     )
 
 
-def _catalog(provider: str) -> list[ModelInfo]:
-    return [
-        _model(e.model, e.label, capabilities=e.capabilities.model_copy(deep=True))
-        for e in CATALOG
-        if e.provider == provider
-    ]
-
-
 def _redact_payload(value: Any, key: str) -> Any:
     if not key:
         return value
@@ -149,7 +141,7 @@ def _redact_payload(value: Any, key: str) -> Any:
 
 
 def get_model_metadata(*, model: str, listing: ModelListing | None = None) -> ModelInfo:
-    """Use a caller's live/cached listing first, then the shared curated registry.
+    """Use a caller's live/cached listing; absent IDs have unknown metadata.
 
     No I/O. An unrecognized ID has explicit unknown fields, not invented
     defaults. Listing.error/note remain on the supplied listing for the caller.
@@ -206,7 +198,7 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
         info = _model(label or model, label)
         info.id = model
         return info
-    if provider == "local":
+    if provider in {"local", "openai"}:
         return _model(model)
     advertised: set[str] = set()
     provider_defaults: dict[str, Any] = {}
@@ -216,6 +208,8 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
         effort = raw.get("effort") or {}
         temperature = raw.get("temperature") or {}
         caps = _capabilities_from_anthropic(raw, model)
+        if effort:
+            advertised.update({"effort_levels_complete", "unsupported_effort_levels", "effort_levels"})
         if "supported" in effort:
             advertised.update({"supports_effort", "effort_levels"})
         if "default_effort" in effort:
@@ -235,7 +229,9 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
         if "supported_parameters" in entry or "reasoning" in entry:
             advertised.add("supports_effort")
         if "supported_efforts" in reasoning:
-            advertised.add("effort_levels")
+            advertised.update({"effort_levels", "effort_levels_complete"})
+        if reasoning.get("mandatory"):
+            advertised.add("unsupported_effort_levels")
         if "default_effort" in reasoning:
             advertised.add("default_effort")
             provider_defaults["effort"] = reasoning["default_effort"]
@@ -244,18 +240,18 @@ def _parse(config: ProviderConfig, entry: dict[str, Any]) -> ModelInfo | None:
             advertised.add("default_temperature")
             provider_defaults["temperature"] = defaults["temperature"]
         additional = {k: v for k, v in defaults.items() if k != "temperature"}
+        if "default_enabled" in reasoning:
+            additional["reasoning.default_enabled"] = reasoning["default_enabled"]
         label = entry.get("name")
     info = _model(model, label, capabilities=caps, advertised=advertised, additional=additional)
-    # Defaults are facts independent of capability validation. Provider values
-    # (including explicit nulls) override catalog facts; inference stays constrained.
-    catalog = get_capabilities(model)
+    # Preserve defaults independently of support validation. Never fill gaps.
     info.defaults.temperature = _default(
-        provider_defaults.get("temperature", catalog.default_temperature),
-        "provider" if "temperature" in provider_defaults else "catalog",
+        provider_defaults.get("temperature"),
+        "provider" if "temperature" in provider_defaults else "unknown",
     )
     info.defaults.effort = _default(
-        provider_defaults.get("effort", catalog.default_effort),
-        "provider" if "effort" in provider_defaults else "catalog",
+        provider_defaults.get("effort"),
+        "provider" if "effort" in provider_defaults else "unknown",
     )
     return info
 
@@ -277,8 +273,8 @@ async def discover_models(
 ) -> ModelListing:
     """List selectable models/deployments, preserving provider-specific policy.
 
-    OpenAI is curated, Anthropic falls back to the catalog, OpenRouter is
-    public, Azure requires a project endpoint, and local discovery is best effort.
+    All listings come from providers. OpenRouter is public, Azure requires a
+    project endpoint, and local discovery is best effort. Failures supply no facts.
     No implicit environment credentials, retries, caches or inference calls.
     An optional client is caller-owned and remains open. Pass client or transport,
     not both. Requests always override client timeouts, redirects and auth.
@@ -286,10 +282,12 @@ async def discover_models(
     if client is not None and transport is not None:
         raise ValueError("Pass either client or transport, not both")
     provider = config.provider
-    if provider == "openai":
-        return ModelListing(models=_catalog(provider), source="static")
-    if provider == "anthropic" and not _key(config):
-        return ModelListing(models=_catalog(provider), source="static")
+    if provider in {"openai", "anthropic"} and not _key(config):
+        return ModelListing(
+            source="error",
+            error=ProviderError(kind="credentials_missing"),
+            note="No credential supplied for this provider.",
+        )
     if provider == "azure_foundry":
         if not config.api_base:
             return ModelListing(
@@ -336,30 +334,22 @@ async def discover_models(
     except (httpx.HTTPError, ValueError, TypeError, KeyError, AttributeError) as exc:
         error = _error(exc)
         message = _error_message(error)
-        if provider == "anthropic":
-            return ModelListing(
-                models=_catalog(provider),
-                source="static",
-                error=error,
-                note=f"Anthropic model discovery failed ({message}). Returning the built-in catalog.",
-            )
         note = {
+            "anthropic": f"Anthropic model discovery failed ({message}). Supply a model ID explicitly for inference.",
+            "openai": f"OpenAI model discovery failed ({message}). Supply a model ID explicitly for inference.",
             "local": _LOCAL_NOTE,
             "azure_foundry": f"Could not reach the Azure Foundry project to list deployments: {message}",
             "openrouter": f"OpenRouter model discovery failed ({message}). "
             "Model IDs can still be supplied explicitly for inference.",
         }[provider]
         return ModelListing(source="error", note=note, error=error)
-    if not models:
-        if provider == "anthropic":
-            return ModelListing(models=_catalog(provider), source="static", error=ProviderError(kind="empty"))
-        if provider != "azure_foundry":
-            note = (
-                _LOCAL_NOTE
-                if provider == "local"
-                else "OpenRouter returned no models. Model IDs can still be supplied explicitly for inference."
-            )
-            return ModelListing(source="error", note=note, error=ProviderError(kind="empty"))
+    if not models and provider != "azure_foundry":
+        note = (
+            _LOCAL_NOTE
+            if provider == "local"
+            else "The provider returned no models. Model IDs can still be supplied explicitly for inference."
+        )
+        return ModelListing(source="error", note=note, error=ProviderError(kind="empty"))
     if provider != "anthropic":
         models.sort(key=lambda m: m.id)
     return ModelListing(models=models, source="api")

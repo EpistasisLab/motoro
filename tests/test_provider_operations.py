@@ -13,8 +13,155 @@ from pydantic import ValidationError
 from motoro.services.model_capabilities import get_capabilities
 from motoro.services.provider_types import DefaultValue, ModelListing, ProviderConfig
 from motoro.services.providers import check_connection, discover_models, get_model_defaults, get_model_metadata
+from motoro.services.sampling import UnsupportedEffortError, resolve_sampling
 
 KEY = "private-credential-never-surface"
+
+
+async def test_anthropic_haiku_and_future_efforts_need_no_registry() -> None:
+    levels = ["low", "medium", "high", "xhigh", "max", "future-effort"]
+    listing = await discover_models(
+        config("anthropic"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "claude-haiku-5-5",
+                        "capabilities": {
+                            "effort": {
+                                "supported": True,
+                                **{level: {"supported": True} for level in levels},
+                                "retired-effort": {"supported": False},
+                                "unknown-effort": None,
+                            }
+                        },
+                    }
+                ]
+            }
+        ),
+    )
+    info = listing.models[0]
+    assert info.capabilities.effort_levels == levels
+    assert info.defaults.effort.source == "unknown"
+    assert resolve_sampling(info).as_kwargs() == {}
+    for level in [*levels, "unknown-effort", "unlisted-effort"]:
+        assert resolve_sampling(info, effort=level).effort == level
+    with pytest.raises(UnsupportedEffortError):
+        resolve_sampling(info, effort="retired-effort")
+
+
+@pytest.mark.parametrize("raw", [None, {}, {"effort": None}, {"effort": {"supported": True}}])
+async def test_incomplete_anthropic_metadata_defers_explicit_validation(raw: Any) -> None:
+    listing = await discover_models(
+        config("anthropic"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "claude-haiku-5-5",
+                        "capabilities": raw,
+                    }
+                ]
+            }
+        ),
+    )
+    assert listing.source == "api"
+    info = listing.models[0]
+    assert resolve_sampling(info, effort="medium", temperature=0.7).as_kwargs() == {
+        "temperature": 0.7,
+        "reasoning_effort": "medium",
+    }
+    assert resolve_sampling(info).as_kwargs() == {}
+
+
+async def test_discovery_is_stateless_and_failure_does_not_reuse_previous_facts() -> None:
+    good = await discover_models(
+        config("anthropic"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "future",
+                        "capabilities": {"effort": {"supported": False}},
+                    }
+                ]
+            }
+        ),
+    )
+    assert good.models[0].capabilities.supports_effort is False
+    failed = await discover_models(config("anthropic"), transport=transport(503, {}))
+    info = get_model_metadata(model="future", listing=failed)
+    assert info.capabilities.supports_effort is None
+    assert resolve_sampling(info, effort="medium").effort == "medium"
+
+
+@pytest.mark.parametrize(
+    "reasoning",
+    [
+        {"supported_efforts": ["future", "max"], "default_effort": "future"},
+        {"supported_efforts": None, "default_effort": "future"},
+    ],
+)
+async def test_openrouter_future_names_defaults_and_invalid_values(reasoning: dict[str, Any]) -> None:
+    listing = await discover_models(
+        config("openrouter"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "new/model",
+                        "reasoning": reasoning,
+                    }
+                ]
+            }
+        ),
+    )
+    info = listing.models[0]
+    assert resolve_sampling(info).effort == "future"
+    assert resolve_sampling(info).effort_source == "advertised_default"
+    if reasoning["supported_efforts"] is not None:
+        with pytest.raises(UnsupportedEffortError):
+            resolve_sampling(info, effort="invalid")
+    else:
+        assert resolve_sampling(info, effort="another-future-name").effort == "another-future-name"
+
+
+async def test_openrouter_conditional_default_does_not_enable_reasoning() -> None:
+    listing = await discover_models(
+        config("openrouter"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "new/model",
+                        "reasoning": {"supported_efforts": None, "default_effort": "high", "default_enabled": False},
+                    }
+                ]
+            }
+        ),
+    )
+    info = listing.models[0]
+    assert info.defaults.effort.value == "high"
+    assert resolve_sampling(info).effort is None
+    assert resolve_sampling(info, effort="high").effort == "high"
+
+
+async def test_mandatory_openrouter_reasoning_rejects_explicit_none_with_unknown_ladder() -> None:
+    listing = await discover_models(
+        config("openrouter"),
+        transport=transport(
+            payload={
+                "data": [
+                    {
+                        "id": "new/model",
+                        "reasoning": {"supported_efforts": None, "mandatory": True},
+                    }
+                ]
+            }
+        ),
+    )
+    with pytest.raises(UnsupportedEffortError):
+        resolve_sampling(listing.models[0], effort="none")
 
 
 def config(provider: str, **kwargs: Any) -> ProviderConfig:
@@ -62,7 +209,7 @@ async def test_connection_statuses(provider: str, code: int) -> None:
         assert "doesn't verify quota or billing" in result.detail
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
 @pytest.mark.parametrize("kind", ["network", "timeout"])
 async def test_transport_failures_are_safe_and_distinct(
     provider: str, kind: str, caplog: pytest.LogCaptureFixture
@@ -75,8 +222,8 @@ async def test_transport_failures_are_safe_and_distinct(
     check = await check_connection(config(provider), transport=httpx.MockTransport(fail))
     assert listing.error is not None and listing.error.kind == kind
     assert check.error is not None and check.error.kind == kind
-    assert listing.source == ("static" if provider == "anthropic" else "error")
-    assert bool(listing.models) == (provider == "anthropic")
+    assert listing.source == "error"
+    assert listing.models == []
     assert KEY not in listing.model_dump_json() + check.model_dump_json() + caplog.text
 
 
@@ -107,15 +254,9 @@ async def test_caller_owned_client_is_reused_with_request_protections(provider: 
         listing = await discover_models(config(provider), client=client)
         assert not client.is_closed
         assert check.status == ("ok" if status == 200 else "unknown" if provider == "local" else "failed")
-        assert listing.source == (
-            "static"
-            if provider == "openai" or provider == "anthropic" and status != 200
-            else "api"
-            if status == 200
-            else "error"
-        )
+        assert listing.source == ("api" if status == 200 else "error")
         # No redirect followups, and the Azure/local check delegates through this client.
-        assert len(calls) == (1 if provider == "openai" else 2)
+        assert len(calls) == 2
     assert client.is_closed
 
 
@@ -129,40 +270,44 @@ async def test_client_and_transport_are_mutually_exclusive(operation: str) -> No
         assert not client.is_closed
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
 @pytest.mark.parametrize(
     "code,kind", [(401, "credential_rejected"), (403, "credential_rejected"), (429, "rate_limited"), (503, "http")]
 )
-async def test_discovery_errors_and_catalog_fallback(provider: str, code: int, kind: str) -> None:
+async def test_discovery_errors_do_not_invent_metadata(provider: str, code: int, kind: str) -> None:
     result = await discover_models(config(provider), transport=transport(code, {"error": KEY}))
     assert result.error is not None and result.error.kind == kind and result.error.http_status == code
-    assert result.source == ("static" if provider == "anthropic" else "error")
+    assert result.source == "error" and result.models == []
     assert result.note and KEY not in result.model_dump_json()
-    if provider == "anthropic":
-        assert result.models
-        assert result.models[0].defaults.effort.source == "catalog"
 
 
 @pytest.mark.parametrize(
-    "provider,source", [("anthropic", "static"), ("openrouter", "error"), ("azure_foundry", "api"), ("local", "error")]
+    "provider,source",
+    [
+        ("anthropic", "error"),
+        ("openai", "error"),
+        ("openrouter", "error"),
+        ("azure_foundry", "api"),
+        ("local", "error"),
+    ],
 )
 async def test_empty_listing_policy(provider: str, source: str) -> None:
     result = await discover_models(config(provider), transport=transport(payload={"data": [], "value": []}))
     assert result.source == source
-    assert bool(result.models) == (provider == "anthropic")
+    assert result.models == []
     unknown = get_model_metadata(model="unknown", listing=result)
     assert all(value == "unknown" for value in unknown.capability_sources.values())
     assert not unknown.defaults.temperature.known and not unknown.defaults.effort.known
 
 
-async def test_catalog_and_missing_config_never_contact_provider() -> None:
+async def test_missing_config_never_contacts_provider() -> None:
     def fail(request: httpx.Request) -> httpx.Response:
         pytest.fail("Unexpected provider request")
 
     mock = httpx.MockTransport(fail)
     for provider in ["openai", "anthropic"]:
         result = await discover_models(ProviderConfig(provider=provider), transport=mock)
-        assert result.source == "static" and result.models
+        assert result.source == "error" and result.error.kind == "credentials_missing" and result.models == []
     for provider in ["openai", "anthropic", "openrouter"]:
         result = await check_connection(ProviderConfig(provider=provider), transport=mock)
         assert result.status == "unknown" and result.error.kind == "credentials_missing"
@@ -176,12 +321,24 @@ async def test_catalog_and_missing_config_never_contact_provider() -> None:
     assert "Project endpoint" in (await discover_models(azure, transport=mock)).note
 
 
-async def test_openai_catalog_ignores_listing_transport_even_with_key() -> None:
+async def test_openai_lists_live_ids_without_inventing_sampling_facts() -> None:
     calls: list[httpx.Request] = []
-    listing = await discover_models(config("openai"), transport=transport(401, {}, calls))
-    assert calls == [] and listing.source == "static" and listing.error is None
-    assert get_model_defaults(model="gpt-5", listing=listing).effort.value == "medium"
-    assert get_model_defaults(model="gpt-5", listing=listing).effort.source == "catalog"
+    listing = await discover_models(
+        config("openai"),
+        transport=transport(
+            payload={
+                "data": [
+                    {"id": "future", "object": "model", "owned_by": "openai", "created": 123},
+                    {"id": "gpt-5"},
+                ]
+            },
+            requests=calls,
+        ),
+    )
+    assert len(calls) == 1 and listing.source == "api" and listing.error is None
+    assert [m.id for m in listing.models] == ["future", "gpt-5"]
+    assert calls[0].url.path == "/v1/models" and calls[0].headers["authorization"] == f"Bearer {KEY}"
+    assert get_model_defaults(model="gpt-5", listing=listing).effort.source == "unknown"
 
 
 async def test_azure_ids_underlying_model_capabilities_and_check_consistency() -> None:
@@ -198,7 +355,7 @@ async def test_azure_ids_underlying_model_capabilities_and_check_consistency() -
     assert [m.id for m in listing.models] == ["custom", "prod"]
     prod = get_model_metadata(model="prod", listing=listing)
     assert prod.label == "claude-opus-5" and prod.capabilities == get_capabilities("claude-opus-5")
-    assert prod.defaults.effort.source == "catalog"
+    assert prod.defaults.effort.source == "unknown"
     assert calls[0].url.path == "/api/projects/project/deployments"
     assert calls[0].url.params["api-version"] == "v1" and calls[0].headers["api-key"] == KEY
 
@@ -248,8 +405,8 @@ async def test_anthropic_pagination_and_mixed_provenance() -> None:
     assert listing.source == "api" and len(calls) == 2
     opus, new = listing.models
     assert opus.capability_sources["supports_effort"] == "provider"
-    assert opus.capability_sources["supports_temperature"] == "catalog"
-    assert opus.defaults.effort.value == "high" and opus.defaults.effort.source == "catalog"
+    assert opus.capability_sources["supports_temperature"] == "unknown"
+    assert opus.defaults.effort.value is None and opus.defaults.effort.source == "unknown"
     assert new.capabilities.supports_effort is False
     assert new.defaults.temperature.value == 0 and new.defaults.temperature.source == "provider"
     assert not new.defaults.effort.known
@@ -309,7 +466,7 @@ async def test_public_openrouter_defaults_and_support_are_independent() -> None:
 @pytest.mark.parametrize(
     "reasoning,levels,support",
     [
-        ({"supported_efforts": None}, ["none", "minimal", "low", "medium", "high", "xhigh", "max"], True),
+        ({"supported_efforts": None}, None, True),
         ({"supported_efforts": []}, [], False),
         ({}, None, False),
     ],
@@ -323,15 +480,15 @@ async def test_openrouter_reasoning_semantics(reasoning: Any, levels: Any, suppo
     assert result.models[0].capabilities.effort_levels == levels
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
 @pytest.mark.parametrize("payload", [[], {"data": [1], "value": [1]}, {"data": [{"id": 3}], "value": [{"name": 3}]}])
 async def test_malformed_metadata_is_normalized(provider: str, payload: Any) -> None:
     result = await discover_models(config(provider), transport=transport(payload=payload))
     assert result.error is not None and result.error.kind == "invalid_response"
-    assert result.source == ("static" if provider == "anthropic" else "error")
+    assert result.source == "error"
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
 @pytest.mark.parametrize(
     "payload",
     [
@@ -356,7 +513,7 @@ async def test_missing_or_falsey_listing_fields_are_invalid(provider: str, paylo
 
 @pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
 @pytest.mark.parametrize("advertised", ["missing", "high", None])
-async def test_partial_metadata_preserves_catalog_defaults(provider: str, advertised: str | None) -> None:
+async def test_partial_metadata_does_not_supply_catalog_defaults(provider: str, advertised: str | None) -> None:
     model = "openai/gpt-5" if provider == "openrouter" else "claude-opus-5"
     effort: dict[str, Any] = (
         {"supported_efforts": ["low"]} if provider == "openrouter" else {"supported": True, "low": {"supported": True}}
@@ -373,19 +530,19 @@ async def test_partial_metadata_preserves_catalog_defaults(provider: str, advert
     info = get_model_metadata(model=model, listing=listing)
     default = info.defaults.effort
     assert default.value == (get_capabilities(model).default_effort if advertised == "missing" else advertised)
-    assert default.source == ("catalog" if advertised == "missing" else "unknown" if advertised is None else "provider")
+    assert default.source == ("unknown" if advertised in {"missing", None} else "provider")
     # The catalog default is outside the advertised ladder; inference must still omit it.
     assert info.capabilities.default_effort is None
     assert info.capabilities.effort_levels == ["low"]
 
 
-async def test_openrouter_support_metadata_preserves_catalog_default() -> None:
+async def test_openrouter_support_metadata_keeps_default_unknown() -> None:
     listing = await discover_models(
         config("openrouter"),
         transport=transport(payload={"data": [{"id": "openai/gpt-5", "supported_parameters": ["reasoning_effort"]}]}),
     )
-    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.value == "medium"
-    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.source == "catalog"
+    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.value is None
+    assert get_model_defaults(model="openai/gpt-5", listing=listing).effort.source == "unknown"
 
 
 @pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
@@ -401,18 +558,18 @@ def test_valid_endpoint_ports(base: str) -> None:
     assert config("local", api_base=base).api_base == base
 
 
-async def test_missing_metadata_keeps_curated_facts_and_unknowns() -> None:
+async def test_missing_metadata_keeps_fields_unknown() -> None:
     result = await discover_models(
         ProviderConfig(provider="openrouter"),
         transport=transport(payload={"data": [{"id": "gpt-5"}, {"id": "never-seen"}]}),
     )
     assert get_model_metadata(model="gpt-5", listing=result).capabilities == get_capabilities("gpt-5")
-    assert get_model_defaults(model="gpt-5", listing=result).effort.source == "catalog"
+    assert get_model_defaults(model="gpt-5", listing=result).effort.source == "unknown"
     unknown = get_model_metadata(model="never-seen", listing=result)
     assert unknown.capabilities.supports_effort is None and not unknown.defaults.effort.known
-    assert get_model_defaults(model="gpt-5", listing=ModelListing(source="api")).effort.known
+    assert not get_model_defaults(model="gpt-5", listing=ModelListing(source="api")).effort.known
     result.models[0].capabilities.supports_temperature = None
-    assert get_capabilities("gpt-5").supports_temperature is False
+    assert get_capabilities("gpt-5").supports_temperature is None
 
 
 async def test_partial_temperature_metadata_does_not_erase_independent_facts() -> None:

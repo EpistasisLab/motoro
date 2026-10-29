@@ -1,90 +1,76 @@
-"""Provider capability interpretation; shared with the public provider operations."""
+"""Interpret provider responses without model-name heuristics or static maps."""
 
 from typing import Any
 
-from motoro.services.model_capabilities import EFFORT_LEVELS_FULL, ModelCapabilities, get_capabilities
+from motoro.services.model_capabilities import ModelCapabilities
 
 
 def _capabilities_from_anthropic(caps: dict[str, Any], model: str = "") -> ModelCapabilities:
-    """Map Anthropic's own capability tree onto ModelCapabilities.
+    """Read capability nodes dynamically, including future effort names.
 
-    Shape confirmed live against GET /v1/models::
-
-        "effort": {"supported": true,
-                   "low": {"supported": true}, ..., "max": {"supported": true}}
-
-    This is strictly better than Motoro's hand-maintained _REGISTRY for
-    this provider: the registry gives every entry one hardcoded effort ladder,
-    whereas the real ladders differ per model (opus-4-5 stops at high,
-    sonnet-4-6/opus-4-6 have no xhigh, the 5-series has the full set) and
-    older models like haiku-4-5/sonnet-4-5 report effort unsupported outright.
-
-    The current API does not state temperature support or sampling defaults.
-    Preserve those independent facts from the registry unless explicitly
-    advertised, and leave missing defaults unknown for Motoro to resolve.
+    The published schema exposes effort support/levels, but no sampling defaults
+    or temperature facts. Optional fields below are used only if actually sent
+    by the provider; their absence must never imply a default.
     """
-    registry = get_capabilities(model)
     effort = caps.get("effort") or {}
-    supports_effort = effort.get("supported", registry.supports_effort)
-    levels = (
-        [level for level in EFFORT_LEVELS_FULL if (effort.get(level) or {}).get("supported")]
-        if "supported" in effort
-        else registry.effort_levels
-    )
-    default = effort.get("default_effort", registry.default_effort)
+    support = effort.get("supported")
+    nodes = {name: node for name, node in effort.items() if isinstance(node, dict) and "supported" in node}
+    levels = [name for name, node in nodes.items() if node["supported"] is True]
+    # The tree advertises independent positive/negative facts, without an
+    # exhaustive-list marker. Missing or null future nodes remain unknown.
+    levels_or_unknown = levels if support is not False and levels else [] if support is False else None
+    default = effort.get("default_effort")
+    if support is not True or (levels_or_unknown is not None and default not in levels_or_unknown):
+        default = None
     temperature = caps.get("temperature") or {}
-    supports_temperature = temperature.get("supported", registry.supports_temperature)
     return ModelCapabilities(
-        supports_temperature=supports_temperature,
-        default_temperature=temperature.get("default", registry.default_temperature)
-        if supports_temperature is True
-        else None,
-        supports_effort=supports_effort,
-        effort_levels=levels if levels or supports_effort is False else None,
-        default_effort=default if supports_effort and (levels is None or default in levels) else None,
+        supports_effort=support,
+        effort_levels=levels_or_unknown,
+        effort_levels_complete=False,
+        unsupported_effort_levels=[name for name, node in nodes.items() if node["supported"] is False] or None,
+        default_effort=default,
+        supports_temperature=temperature.get("supported"),
+        default_temperature=temperature.get("default") if temperature.get("supported") is True else None,
     )
 
 
 def _capabilities_from_openrouter(entry: dict[str, Any]) -> ModelCapabilities:
-    """Read factual support and defaults independently; Motoro owns fallback policy."""
-    fallback = get_capabilities(entry["id"])
-    if not {"supported_parameters", "reasoning", "default_parameters"} & entry.keys():
-        return fallback
-
-    parameters = entry.get("supported_parameters") or []
-    reasoning = entry.get("reasoning") or {}
-    defaults_only = "supported_parameters" not in entry and "reasoning" not in entry
-    supports_effort = fallback.supports_effort if defaults_only else False
-    levels = fallback.effort_levels if defaults_only else None
-    if "supported_efforts" in reasoning:
-        # null means every gateway effort is accepted; omission means no selector.
-        supports_effort = True
-        advertised = reasoning["supported_efforts"]
-        levels = list(["none", "minimal", *EFFORT_LEVELS_FULL] if advertised is None else advertised)
-    elif "reasoning" not in entry and "reasoning_effort" in parameters:
-        # Older listings expose the parameter without a per-model effort ladder.
-        supports_effort = True
-        levels = fallback.effort_levels
-    if reasoning.get("mandatory") and levels is not None:
-        levels = [level for level in levels if level != "none"]
-    if levels == []:
-        supports_effort = False
-    default = reasoning.get("default_effort", fallback.default_effort if defaults_only else None)
-    if not supports_effort or (levels is not None and default not in levels):
+    """Read independent parameter support, reasoning options, and defaults."""
+    parameters = entry.get("supported_parameters")
+    reasoning = entry.get("reasoning")
+    support = None
+    levels = None
+    if isinstance(reasoning, dict):
+        if "supported_efforts" in reasoning:
+            levels = reasoning["supported_efforts"]
+            # null means all gateway efforts, without hardcoding that vocabulary.
+            support = levels != []
+        elif reasoning.get("default_effort") is not None:
+            support = None  # A default alone does not establish a full ladder.
+        else:
+            support = False  # Present reasoning node without an effort selector.
+        if reasoning.get("mandatory") and levels is not None:
+            levels = [level for level in levels if level != "none"]
+            if not levels:
+                support = False
+    elif isinstance(parameters, list):
+        support = "reasoning_effort" in parameters if "reasoning" not in parameters else None
+    reasoning = reasoning or {}
+    default = reasoning.get("default_effort")
+    if (
+        support is not True
+        or (levels is not None and default not in levels)
+        or reasoning.get("default_enabled") is False
+    ):
         default = None
-    supports_temperature = (
-        "temperature" in parameters if "supported_parameters" in entry else fallback.supports_temperature
-    )
-    restrictions = fallback.temperature_effort_levels
-    if restrictions is not None and levels is not None:
-        restrictions = [level for level in restrictions if level in levels]
+    temperature_support = "temperature" in parameters if isinstance(parameters, list) else None
     return ModelCapabilities(
-        supports_temperature=supports_temperature,
+        supports_temperature=temperature_support,
         default_temperature=(entry.get("default_parameters") or {}).get("temperature")
-        if supports_temperature is True
+        if temperature_support is True
         else None,
-        supports_effort=supports_effort,
+        supports_effort=support,
         effort_levels=levels,
         default_effort=default,
-        temperature_effort_levels=restrictions if supports_temperature is True and supports_effort else None,
+        unsupported_effort_levels=["none"] if reasoning.get("mandatory") else None,
     )

@@ -315,237 +315,49 @@ from motoro.services.credentials import set_credential_resolver
 set_credential_resolver(my_resolver)   # e.g. ASAREE reads a per-user settings table
 ```
 
-### Model capabilities
+### Model capabilities and provider discovery
 
-`motoro.services.model_capabilities.ModelCapabilities` describes factual support,
-independently of selected configuration. Its shared JSON contract is:
-
-| Field | Meaning |
-| --- | --- |
-| `supports_temperature`, `supports_effort` | `true` supported, `false` unsupported, `null` unknown (default) |
-| `default_temperature` | Optional advertised default, including `0.0`; `null` means unadvertised |
-| `effort_levels` | Unique accepted strings, or `null` for unknown; legacy `[]` remains valid without effort support |
-| `default_effort` | Optional advertised default; `null` is unset, literal `"none"` disables reasoning |
-| `temperature_effort_levels` | Optional allowlist: temperature requires a resolved effort in this list; `[]` forbids every mode; `null` imposes no additional restriction |
-
-Effort support does not require a known default or complete level list. Advertised
-defaults must belong to the accepted list when that list is known. Metadata for
-unsupported controls cannot advertise defaults. Unknown models now have unknown
-support and omit both parameters; `get_capabilities(model, *, default=DEFAULT_CAPABILITIES)`
-still accepts an explicit caller fallback. Registry matches take precedence.
-Only exact model IDs and dated variants inherit registry rules, avoiding accidental
-application of base-model rules to unverified variants such as `gpt-5.2-pro`.
-
-ASAREE should validate its live capability metadata with
-`motoro.services.model_capabilities.ModelCapabilities.model_validate()` and
-populate `ModelConfig.resolved_capabilities` (or the same field on
-`PartialModelConfig` at its agent/API boundary). Use that validated object
-to render the UI and carry it into execution:
+Sampling uses provider facts without a per-model registry or LiteLLM model-map
+fallback. Discovery is stateless: callers supply credentials and own caching.
 
 ```python
 from motoro.schemas.agent import ModelConfig
-from motoro.services.llm_service import LLMService
-from motoro.services.model_capabilities import ModelCapabilities, get_capabilities
+from motoro.services.provider_types import ProviderConfig
+from motoro.services.providers import discover_models, get_model_metadata
 from motoro.services.sampling import resolve_sampling
 
-# live_metadata is supplied by the product's capability discovery.
-caps = ModelCapabilities.model_validate(live_metadata)
-# Without live discovery: caps = get_capabilities("my-model")
-config = ModelConfig(
-    provider="openai",
-    model="my-model",
-    resolved_capabilities=caps,
-    temperature=None,  # unset, so advertised defaults remain visible
-    effort=None,       # distinct from effort="none"
-)
-# Use the same resolver for UI previews and effective experiment settings.
-effective = resolve_sampling(
-    caps, temperature=config.temperature, effort=config.effort, model=config.model,
-)
-wire_parameters = effective.as_kwargs()  # temperature / reasoning_effort, omitting unset values
-provenance = effective.model_dump()      # effective values, sources, omission reasons
-text, record = await LLMService().complete_text(
-    config, [{"role": "user", "content": "Hello"}]
-)
+listing = await discover_models(ProviderConfig(provider="anthropic", api_key="your-key"))
+metadata = get_model_metadata(model="claude-haiku-5-5", listing=listing)
+config = ModelConfig(provider="anthropic", model=metadata.id,
+                     model_metadata=metadata, effort="medium")
+effective = resolve_sampling(metadata, temperature=config.temperature, effort=config.effort)
 ```
 
-Resolved capabilities override the registry, including conflicting known
-entries. When absent, execution calls `get_capabilities()` with the effective
-provider model string. The same decision applies to structured completions,
-text completions, native tool calls, tool selection, and their retries.
-The field survives JSON serialization and Motoro's agent/run execution path;
-each `fallback_models` entry carries its own capabilities independently.
-Supply metadata for the effective model, including any deployment mapping,
-and refresh or clear it when changing the model or provider.
+Retain the entire `ModelInfo`, including `capability_sources` and `defaults`,
+in `ModelConfig.model_metadata` (also available on `PartialModelConfig`).
+Only facts with provider provenance drive automatic resolution. Explicit
+`resolved_capabilities` remains a caller override and takes precedence;
+its defaults are labelled `capability_override`, not `advertised_default`.
 
-The public resolver interface is
-`resolve_sampling(capabilities, *, temperature=None, effort=None, model="<unspecified>") -> ResolvedSampling`.
-It has no dependency on product discovery, databases, or execution schemas.
-`ResolvedSampling` contains `temperature`, `effort`, `temperature_source`,
-`effort_source`, and separate `*_omission_reason` fields. Sources are `explicit`,
-`advertised_default`, `application_fallback`, and `omitted`.
+Explicit temperature/effort is preserved unless contradicted by known facts.
+Unknown support or incomplete effort ladders defer validation to the provider.
+Unset controls use advertised defaults when available; otherwise they are omitted.
+There is no lowest-effort or temperature 0.5 fallback. Known incompatible
+combinations raise `SamplingCombinationError`; known unsupported efforts raise
+`UnsupportedEffortError`. Both are terminal `SamplingConfigurationError` values.
+Provider bad requests also terminate without trying a different fallback configuration.
 
-Temperature resolves to explicit configuration, then the advertised default, then
-application fallback `0.5`. Effort resolves to explicit configuration, then the
-advertised default (including `"none"`), then the lowest accepted active level in
-the semantic order `minimal < low < medium < high < xhigh < max`. Provider list
-order never determines policy. Disabled `"none"` is never an automatic fallback.
-Unranked provider-specific strings can be selected explicitly or advertised as
-defaults, but are not guessed as fallbacks. Unknown accepted levels omit effort,
-unless an advertised default itself establishes an accepted value. Other explicit
-values cannot be validated against an unknown list and fail visibly.
+`discover_models` and `check_connection` accept a caller-owned
+`httpx.AsyncClient` or `httpx.MockTransport`; requests use a 10-second timeout,
+explicit credentials, and no redirects or automatic retries. Model/default
+lookups perform no I/O. All five discovery providers use live APIs; failed
+discovery returns an empty error listing. Azure needs a project endpoint.
+Model IDs can still be supplied explicitly for inference.
 
-Both controls are sent when supported and compatible. A combination allowlist
-is checked against resolved effort. An explicit incompatible temperature raises
-`SamplingCombinationError`; an unset temperature in that mode stays omitted with
-reason `incompatible_effort`, without generating a temperature default. Unknown
-or unsupported temperature support omits even legacy saved temperatures.
-Unsupported explicit efforts raise `UnsupportedEffortError`, including on
-temperature-only models. Both errors subclass `SamplingConfigurationError`
-(`ValueError`) and terminate without retry or fallback. `UnsupportedEffortError`
-also remains importable from `llm_service` for existing callers.
-
-For resolved OpenRouter requests only, a validated effective effort still adds
-`allowed_openai_params=["reasoning_effort"]`, including when temperature is also
-sent. Omitted effort gets no allowance. Motoro does not enable global `drop_params`.
-
-For custom temperature-only models, pass
-`resolved_capabilities=TEMPERATURE_ONLY_CAPABILITIES`, imported from
-`motoro.services.model_capabilities`, or equivalent metadata:
-
-```python
-{"supports_temperature": True, "supports_effort": False,
- "effort_levels": [], "default_effort": None}
-```
-
-Compatibility: `ModelConfig.temperature` and `PartialModelConfig.temperature`
-now default to `None` and accept JSON `null`. Existing saved numeric values,
-including `0.7` and `0.0`, remain explicit through serialization and execution.
-Old capability payloads with both boolean flags, levels, and a default still
-validate. Previously fabricated unknown-model medium effort is no longer sent.
-Products should preserve missing defaults as `null` and call the shared resolver
-instead of copying its policy. No database migration is required in Motoro.
-
-Provider rules verified against official documentation on 2026-10-27:
-[OpenAI compatibility](https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.2)
-states original GPT-5/mini/nano reject temperature, while GPT-5.1/5.2 accept it
-only at effort `"none"`. The registry represents both controls for 5.1/5.2 with
-`temperature_effort_levels=["none"]`, and their advertised default is `"none"`
-([GPT-5.1](https://developers.openai.com/api/docs/models/gpt-5.1),
-[GPT-5.2](https://developers.openai.com/api/docs/models/gpt-5.2)). Original
-[GPT-5](https://developers.openai.com/api/docs/models/gpt-5) includes `minimal`.
-The existing curated Claude effort-only entries now record the advertised `high`
-default rather than the former suggested `medium`
-([Anthropic effort](https://platform.claude.com/docs/en/build-with-claude/effort)).
-Live provider/deployment metadata takes precedence over these curated entries;
-the registry does not discover or infer other thinking modes.
-
-### Provider checks, listings, and defaults
-
-Use `motoro.services.providers` without a database, runtime, cache, or product
-models. Configuration is explicit; these operations never consult environment
-credentials or the inference credential resolver. The caller owns authorization,
-credential storage, rate limits, and cache policy.
-
-```python
-from motoro.services.provider_types import ProviderConfig
-from motoro.services.providers import (
-    check_connection, discover_models, get_model_metadata, get_model_defaults,
-)
-
-# Within an async function. OpenRouter listings are also public without a key.
-config = ProviderConfig(provider="openrouter", api_key="your-key")
-check = await check_connection(config)
-listing = await discover_models(config)
-metadata = get_model_metadata(model="vendor/model", listing=listing)
-defaults = get_model_defaults(model="vendor/model", listing=listing)
-if defaults.temperature.known:
-    print(defaults.temperature.value, defaults.temperature.source)
-```
-
-The runnable [independent example](examples/provider_metadata.py) uses
-`httpx.MockTransport` and makes no network requests. Both async operations accept
-`transport: httpx.AsyncBaseTransport | None = None` for deterministic testing.
-For connection pooling across operations, pass `client: httpx.AsyncClient` instead:
-
-```python
-import httpx
-
-async with httpx.AsyncClient() as client:
-    check = await check_connection(config, client=client)
-    listing = await discover_models(config, client=client)
-```
-
-The caller owns and closes the supplied client. `client` and `transport` are
-mutually exclusive. Each request overrides the client's timeout, redirect policy,
-and default authentication; credentials come from `ProviderConfig`. Use a dedicated
-client without unrelated default headers, cookies, or query parameters.
-Only explicit connection checks and discovery issue requests, all GETs with a
-10-second timeout and no redirects or automatic retries. Metadata/default
-lookups are synchronous and perform no I/O. No metadata operation runs inference.
-
-`ProviderConfig` accepts `provider`, optional secret `api_key`, `api_base`, and
-`azure_project_endpoint`. Supported providers are `anthropic`, `openai`,
-`azure_foundry`, `openrouter`, and `local`. Keys are excluded from serialization
-and repr. Endpoints must have valid ports and cannot contain URL credentials,
-queries, or fragments. Local bases include the server's API path, typically
-`/v1`; Azure deployment discovery
-requires the separately supplied project endpoint, not just the inference host.
-
-`discover_models(config)` returns `ModelListing(models, source, note, error)`.
-Each `ModelInfo` has `id`, `label`, existing `ModelCapabilities`, per-field
-`capability_sources`, and `ModelDefaults`. OpenAI uses the curated catalog;
-Anthropic uses paginated live metadata and falls back to the catalog on empty
-or failed discovery. OpenRouter uses its public live catalog, optionally with
-credentials. Azure uses project deployments and resolves sampling metadata by
-underlying model name. Local uses best-effort OpenAI-compatible `/models`.
-
-The listing source remains `api`, `static`, or `error`, so callers can preserve
-existing cache/fallback policy. Empty Azure deployments are a successful `api`
-listing; malformed or missing list fields remain errors. Empty local/OpenRouter
-listings are `error`; empty Anthropic listings fall back to `static`.
-A structured `ProviderError(kind, http_status)` retains
-credential rejection, rate limiting, timeout, network, HTTP, malformed response,
-missing credentials, unavailable discovery, and empty-list outcomes, including
-when a catalog fallback succeeds. Error text never includes raw response bodies
-or provider exception strings. A caller can retain `error` and `note` alongside
-a cached listing; Motoro implements no cache or stale-fallback policy.
-
-`check_connection(config)` returns `ConnectionCheck(status, detail, endpoint,
-models, error)`, with `ok`, `failed`, or `unknown`. Accepted keys do not establish
-quota or billing readiness. Direct Anthropic/OpenAI/OpenRouter rate limits are
-inconclusive. Azure and local reuse discovery: unavailable Azure project
-configuration and unsupported local listings are inconclusive; Azure discovery
-failures fail the check. Successful Azure checks return the exact deployments
-used for the check so a caller can seed its own cache.
-
-`get_model_metadata(model=..., listing=...)` prefers a matching listing entry,
-then the existing registry. Unknown model fields remain `None`. Check the
-supplied listing's `error`/`note` separately: metadata lookup does not erase its
-failure or establish whether that model is accessible to the credential.
-`get_model_defaults` retains explicitly advertised defaults independently of
-sampling support metadata, using curated capability defaults as a fallback.
-Omitted defaults fall back to the catalog even when a live capability ladder
-excludes that default; an explicitly advertised `null` remains unknown.
-An advertised default does not establish support or change inference settings.
-The shared fields are `temperature` and `effort`; other advertised defaults are in
-`additional`. Each `DefaultValue` exposes `value`, `source` (`provider`,
-`catalog`, or `unknown`), and the Python property `known`. In serialized JSON,
-`value: null, source: unknown` denotes unknown; `0`, `false`, `""`, `[]`, and
-`{}` remain known values. Limits such as context size are not invented output
-token defaults. Application preferences and overrides still belong in
-`ModelConfig` and `resolve_sampling`, separately from these facts.
-
-For inference adapters, `get_inference_connection(config, model=...)` returns
-the existing `motoro.services.credentials.Connection` dictionary, including
-Foundry endpoint normalization and the Azure/local LiteLLM routing prefixes.
-Return it from a caller-owned credential resolver; it deliberately contains
-the secret key and must never be serialized to browser responses or logs.
-Pass `metadata.capabilities` as `ModelConfig.resolved_capabilities` to use the
-same provider facts during inference. For tri-state tool support, use
-`motoro.services.llm_service.model_tool_calling_support(provider, model)`;
-unknown models return `None`. The existing execution-pattern boolean helper
-continues to treat unknown support conservatively as false.
+See [the provider schema notes and ASAREE migration handoff](docs/provider-driven-sampling.md)
+for field semantics, API limitations, provenance, wire behavior, caching, and
+published snapshot compatibility. The offline [provider example](examples/provider_metadata.py)
+uses deterministic mock responses.
 
 ### Timeouts
 

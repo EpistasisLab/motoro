@@ -22,7 +22,9 @@ from motoro.models.run import AgentRun
 from motoro.schemas.agent import AgentUpdate, ModelConfig
 from motoro.schemas.output import parse_envelope
 from motoro.schemas.run_config import AgentSnapshotUpdate
+from motoro.services.provider_types import DefaultValue, ModelDefaults, ModelInfo
 from motoro.services.run_config import effective_agent_config
+from motoro.services.sampling import resolve_sampling
 
 
 @pytest.fixture
@@ -299,6 +301,31 @@ async def test_snapshot_does_not_store_model_credentials(storage: Any) -> None:
     )
     assert "api_key" not in run.config_snapshot["model_config"]
     assert "api_key" not in run.config_snapshot["model_config"]["fallback_models"][0]
+
+
+async def test_pinned_sampling_and_provenance_survive_runner_and_resume(storage: Any, execution: Any) -> None:
+    agent, _runs, _db = storage
+    info = ModelInfo(id="future", defaults=ModelDefaults(effort=DefaultValue(value="special", source="provider")))
+    config = ModelConfig(provider="openai", model="future", temperature=0, effort="special", model_metadata=info)
+    run = await runner.create_run(
+        agent_id=agent.id, user_input="question", config_snapshot={"model_config": config.model_dump(mode="json")}
+    )
+    pinned = deepcopy(run.config_snapshot)
+    # Neither a changed application model nor changed discovery data rewrites the pin.
+    agent.model_config_data = {"provider": "openai", "model": "other", "effort": "low"}
+    info.defaults.effort = DefaultValue(value="different", source="provider")
+    await runner.execute_run(run_id=run.id, llm_service=MagicMock())
+    effective = execution[0][run.id][0].model_config
+    assert effective.model_metadata.defaults.effort.value == "special"
+    context = RunContext(agent_goal="goal", system_prompt="prompt", user_input="question", model_config=effective)
+    resumed = RunContext.from_snapshot(context.to_snapshot())
+    assert resumed.model_config == effective
+    resolved = resolve_sampling(
+        resumed.model_config.model_metadata, temperature=effective.temperature, effort=effective.effort
+    )
+    assert resolved.as_kwargs() == {"temperature": 0, "reasoning_effort": "special"}
+    assert resolved.effort_source == resolved.temperature_source == "explicit"
+    assert run.config_snapshot == pinned
 
 
 async def test_model_overrides_apply_on_top_without_replacing_pinned_base(storage: Any) -> None:
