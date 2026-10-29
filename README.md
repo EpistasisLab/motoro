@@ -146,9 +146,23 @@ dependencies = ["motoro"]
 motoro = { git = "https://github.com/EpistasisLab/motoro.git", tag = "v0.2.0" }
 ```
 
-Pin by tag (semver, against core's public surface), not a raw commit SHA. To
-cut a new release: land the change on `main`, confirm dependent products still
-work against it, then `git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
+Pin by tag (semver, against core's public surface), not a raw commit SHA.
+
+Create `feat/*` and `fix/*` branches from `develop`, and submit their PRs to
+`develop`. Completed changes accumulate there for integration testing. CI runs
+on pushes and PRs targeting both `develop` and `main`.
+
+To prepare a release, confirm CI passes and dependent products work against the
+combined changes on `develop`. Open a release PR from `develop` to `main` with
+the proposed version, release notes, and validation results. Merge that PR using
+a merge commit to preserve shared ancestry between the two permanent branches.
+Then tag the resulting `main` commit:
+`git tag -a vX.Y.Z -m "..." && git push origin vX.Y.Z`.
+
+Urgent production fixes branch from `main` as `hotfix/*` and target `main`.
+After releasing a hotfix, merge `main` back into `develop` so the next release
+retains the fix. Feature PRs may use squash merges; release and synchronization
+PRs between the permanent branches use merge commits.
 
 That tag *is* the version: `hatch-vcs` derives both the package version and
 `motoro.__version__` from it at build time, so there is no version string to
