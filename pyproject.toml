@@ -149,4 +149,4 @@ include_external_packages = true
 name = "Core never imports a product"
 type = "forbidden"
 source_modules = ["motoro"]
-forbidden_modules = ["ares", "ecoxai"]
+forbidden_modules = ["ares", "ecoxai", "asaree"]

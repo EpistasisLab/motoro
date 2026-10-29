@@ -209,6 +209,24 @@ def model_supports_tool_calling(config: ModelConfig) -> bool:
         return False
 
 
+def model_tool_calling_support(provider: str, model: str) -> bool | None:
+    """Factual tri-state lookup for consumers; unknown models return None.
+
+    Uses the same routing and oracle as inference's conservative boolean
+    helper. No provider HTTP requests or credential resolution are involved.
+    """
+    if not model:
+        return None
+    try:
+        config = ModelConfig(provider=provider, model=model)
+        prefix = _LITELLM_PROVIDER_PREFIX.get(config.provider)
+        model_str = f"{prefix}/{config.model}" if prefix else config.model
+        litellm.get_model_info(model_str)
+    except Exception:
+        return None
+    return model_supports_tool_calling(config)
+
+
 def _resolve_connection(config: ModelConfig) -> dict[str, str | None]:
     """Resolve API key, base URL, and model string from the *config only*.
 
