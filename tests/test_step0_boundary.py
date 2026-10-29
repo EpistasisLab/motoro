@@ -100,7 +100,7 @@ def test_no_product_imports() -> None:
             elif isinstance(node, ast.Import):
                 names = [a.name for a in node.names]
             for name in names:
-                if name.split(".")[0] in {"ares", "ecoxai"}:
+                if name.split(".")[0] in {"ares", "ecoxai", "asaree"}:
                     offenders.append(f"{path.relative_to(SRC)}:{node.lineno}: imports {name}")
     assert not offenders, "core imports a product:\n" + "\n".join(offenders)
 
