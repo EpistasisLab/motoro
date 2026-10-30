@@ -49,7 +49,21 @@ the rulesets do not restrict a PR's source branch.
 
 CI runs for pushes and PRs targeting both permanent branches. Consult
 [the CI workflow](.github/workflows/ci.yml) for the commands and blocking status
-of each step. Formatting and type checking currently report warnings without
+of each step. Full validation runs when any changed file is outside root Markdown
+documents or documentation text/images under `docs/`. Unknown file types, code,
+tests, dependencies, build configuration, scripts, and workflows require full
+validation. The comparison covers the complete PR merge diff or push, including
+all commits, deletions, and both sides of renames. An unavailable comparison runs
+full validation; an empty diff skips it. Manual workflow runs always validate.
+
+Documentation-only changes still receive the required `Lint, Type Check & Test`
+status through a lightweight check, without installing dependencies or starting
+PostgreSQL. The check fails if change detection fails or required validation does
+not succeed. Workflow-level path filters are deliberately avoided because a
+skipped workflow can leave its required status pending. Post-merge pushes use
+the same rules. Superseded PR runs are cancelled automatically.
+
+Formatting and type checking currently report warnings without
 failing the job, so a green check is not proof those steps were clean. Review
 their output and account for any findings relevant to the change.
 

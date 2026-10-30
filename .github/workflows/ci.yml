@@ -5,14 +5,33 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  test:
-    name: Lint, Type Check & Test
+  changes:
+    name: Detect validation changes
+    runs-on: ubuntu-latest
+    outputs:
+      run_validation: ${{ steps.changes.outputs.run_validation }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Classify the tested diff
+        id: changes
+        run: python3 scripts/ci_changes.py
+
+  validate:
+    name: Full validation
+    needs: changes
+    if: needs.changes.outputs.run_validation == 'true'
     runs-on: ubuntu-latest
 
     services:
@@ -81,3 +100,30 @@ jobs:
 
       - name: Pytest
         run: uv run pytest --tb=short -q
+
+  test:
+    # Keep the required status present for docs-only PRs. Detection failures and
+    # unexpected skipped/cancelled validation must fail this check, not pass it.
+    name: Lint, Type Check & Test
+    needs: [changes, validate]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Report validation result
+        env:
+          DETECTION_RESULT: ${{ needs.changes.result }}
+          RUN_VALIDATION: ${{ needs.changes.outputs.run_validation }}
+          VALIDATION_RESULT: ${{ needs.validate.result }}
+        run: |
+          if [ "$DETECTION_RESULT" != "success" ]; then
+            echo "Change detection did not succeed."
+            exit 1
+          fi
+          if [ "$RUN_VALIDATION" = "false" ]; then
+            echo "Documentation-only or empty diff; full validation was not needed."
+          elif [ "$RUN_VALIDATION" = "true" ] && [ "$VALIDATION_RESULT" = "success" ]; then
+            echo "Full validation passed."
+          else
+            echo "Required validation did not succeed."
+            exit 1
+          fi
