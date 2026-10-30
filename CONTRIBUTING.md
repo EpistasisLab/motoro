@@ -13,7 +13,7 @@ and production hotfixes.
 
 | Branch | Start from | PR target | Merge method |
 | --- | --- | --- | --- |
-| `feat/*`, `fix/*`, `docs/*` | `develop` | `develop` | Squash preferred |
+| `feat/*`, `fix/*`, `docs/*` | `develop` | `develop` | Merge commit |
 | Release promotion from `develop` | Existing `develop` | `main` | Merge commit |
 | `hotfix/*` | `main` | `main` | Merge commit |
 | Synchronization from `main` | Existing `main` | `develop` | Merge commit |
@@ -24,8 +24,8 @@ suitable for release validation. An already merged PR is complete: follow-up
 work belongs on a new branch from `develop` and in a new PR.
 
 Feature PRs describe the problem, resulting behavior, and relevant validation.
-Squash merges keep each feature together. Release and synchronization PRs use
-merge commits to preserve shared ancestry between the permanent branches.
+All PRs use merge commits to preserve the original commits and branch ancestry.
+With the GitHub CLI, use `gh pr merge --merge`; do not squash or rebase merge.
 
 ## Required checks and protection
 
@@ -42,7 +42,8 @@ Review is encouraged, but an approving review from a second account is not a
 merge prerequisite. The author remains responsible for inspecting the diff and
 validation evidence before merging.
 
-`develop` allows squash and merge commits. `main` allows merge commits only.
+Both `develop` and `main` allow merge commits only. Repository settings disable
+squash and rebase merging, and both branch rulesets require the merge method.
 Targeting `main` only for release promotion or hotfixes is a workflow convention;
 the rulesets do not restrict a PR's source branch.
 
