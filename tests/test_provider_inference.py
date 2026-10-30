@@ -69,21 +69,20 @@ async def test_live_capabilities_feed_existing_inference_sampling() -> None:
     )
     listing = await discover_models(ProviderConfig(provider="openrouter"), transport=mock)
     metadata = get_model_metadata(model="new/model", listing=listing)
-    cfg = ModelConfig(provider="openrouter", model=metadata.id, resolved_capabilities=metadata.capabilities)
+    cfg = ModelConfig(provider="openrouter", model=metadata.id, model_metadata=metadata)
     assert llm_service._sampling_kwargs(cfg, "openrouter/new/model") == {
-        "temperature": 0,
-        "reasoning_effort": "high",
-        "allowed_openai_params": ["reasoning_effort"],
+        "extra_body": {"temperature": 0, "reasoning": {"effort": "high"}},
+        "drop_params": False,
     }
     # Application overrides affect the request only, never returned metadata.
     cfg.temperature = 0.5
     cfg.effort = "low"
-    assert llm_service._sampling_kwargs(cfg, "openrouter/new/model")["temperature"] == 0.5
+    assert llm_service._sampling_kwargs(cfg, "openrouter/new/model")["extra_body"]["temperature"] == 0.5
     assert metadata.defaults.temperature.value == 0
 
 
 @pytest.mark.parametrize("provider", ["openrouter", "anthropic"])
-async def test_independent_defaults_do_not_change_effective_sampling(provider: str) -> None:
+async def test_independent_provider_defaults_resolve_with_provenance(provider: str) -> None:
     entry = (
         {"id": "new/model", "default_parameters": {"temperature": 0}}
         if provider == "openrouter"
@@ -95,15 +94,13 @@ async def test_independent_defaults_do_not_change_effective_sampling(provider: s
     mock = httpx.MockTransport(lambda request: httpx.Response(200, json={"data": [entry]}))
     listing = await discover_models(ProviderConfig(provider=provider, api_key="example-only"), transport=mock)
     metadata = get_model_metadata(model="new/model", listing=listing)
-    cfg = ModelConfig(provider=provider, model=metadata.id, resolved_capabilities=metadata.capabilities)
+    cfg = ModelConfig(provider=provider, model=metadata.id, model_metadata=metadata)
     assert metadata.defaults.temperature.known and metadata.defaults.temperature.value == 0
     assert metadata.capabilities.supports_temperature is None
     assert metadata.capabilities.default_temperature is None
-    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model") == {}
+    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model")["extra_body"] == {"temperature": 0}
     cfg.temperature = 0.5
-    # Existing policy omits controls whose support is unknown, even with an
-    # application preference. Retrieving a default must not change that policy.
-    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model") == {}
+    assert llm_service._sampling_kwargs(cfg, f"{provider}/new/model")["extra_body"] == {"temperature": 0.5}
     assert cfg.temperature == 0.5
     assert get_model_metadata(model="new/model", listing=listing).defaults.temperature.value == 0
 
