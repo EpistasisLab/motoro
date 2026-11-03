@@ -29,6 +29,7 @@ from motoro.observability.metrics import record_llm_call
 from motoro.observability.tracing import get_tracer
 from motoro.schemas.agent import LLMProvider, ModelConfig
 from motoro.schemas.llm import LLMCallRecord, LLMToolCall, ToolCompletion
+from motoro.services._sampling_transport import acompletion as _acompletion
 from motoro.services.credential_scrubber import scrub as _scrub_creds
 from motoro.services.llm_errors import (
     LLMBudgetExceededError,
@@ -104,7 +105,7 @@ def _normalize_structured_error(exc: Exception) -> Exception:
     """
     if isinstance(exc, InstructorRetryException):
         underlying = exc.args[0] if exc.args else None
-        if isinstance(underlying, ValidationError):
+        if isinstance(underlying, (ValidationError, SamplingConfigurationError, litellm.exceptions.BadRequestError)):
             return underlying
     return exc
 
@@ -171,15 +172,29 @@ def _build_model_string(config: ModelConfig) -> str:
 
 
 def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
-    """Adapt shared resolution to LiteLLM, including its narrow OpenRouter escape hatch."""
-    caps = config.resolved_capabilities or get_capabilities(model_str)
+    """Resolve once, then pass sampling through without LiteLLM model-map policy.
+
+    Native JSON fields bypass LiteLLM's static effort ladders, temperature gates,
+    and effort rewrites. The provider validates unknown controls. Bedrock retains
+    its protocol adapter because Converse/Invoke payloads differ by API family.
+    """
+    if config.model_metadata is not None and config.model_metadata.id != config.model:
+        raise SamplingConfigurationError("model_metadata must describe the configured model/deployment")
+    caps = config.resolved_capabilities or config.model_metadata or get_capabilities(model_str)
     resolved = resolve_sampling(caps, temperature=config.temperature, effort=config.effort, model=model_str)
-    kwargs: dict[str, Any] = resolved.as_kwargs()
-    if resolved.effort is not None and config.resolved_capabilities is not None and model_str.startswith("openrouter/"):
-        # Live metadata can be newer than LiteLLM's model map. Allow only the
-        # effort validated by the shared resolver, on this request alone.
-        kwargs["allowed_openai_params"] = ["reasoning_effort"]
-    return kwargs
+    native: dict[str, Any] = resolved.as_kwargs()
+    if not native:
+        return {}
+    if model_str.startswith("bedrock/"):
+        return {**native, "drop_params": False, "allowed_openai_params": list(native)}
+    if resolved.effort is not None:
+        if model_str.startswith("anthropic/"):
+            native.pop("reasoning_effort")
+            native["output_config"] = {"effort": resolved.effort}
+        elif model_str.startswith("openrouter/"):
+            native.pop("reasoning_effort")
+            native["reasoning"] = {"effort": resolved.effort}
+    return {"extra_body": native, "drop_params": False}
 
 
 def model_supports_tool_calling(config: ModelConfig) -> bool:
@@ -193,11 +208,8 @@ def model_supports_tool_calling(config: ModelConfig) -> bool:
     ``reason_act`` config; a user who asked for the loop gets it, and a
     provider that cannot honour it fails loudly.
 
-    litellm's model map is the oracle rather than
-    ``motoro.services.model_capabilities``: that registry is hand-maintained
-    because litellm mis-reports *sampling* support, but its function-calling
-    flag is derived from each provider's own published metadata and covers far
-    more models than a hand-kept list could.
+    This legacy tool-pattern heuristic uses LiteLLM's model map. Sampling
+    discovery and resolution are independent and never use that map.
     """
     if not config.model:
         return False
@@ -423,7 +435,7 @@ class LLMService:
     """Abstraction over LLM providers using litellm + Instructor."""
 
     def __init__(self, principal_id: uuid.UUID | None = None) -> None:
-        self._instructor_client = instructor.from_litellm(litellm.acompletion)
+        self._instructor_client = instructor.from_litellm(_acompletion)
         self._principal_id = principal_id
 
     @property
@@ -459,7 +471,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete(cfg, messages, response_model, max_retries, principal_id)
-                except (LLMBudgetExceededError, SamplingConfigurationError):
+                except (LLMBudgetExceededError, SamplingConfigurationError, litellm.exceptions.BadRequestError):
                     # Budget exhaustion and invalid sampling config are terminal.
                     raise
                 except Exception as exc:
@@ -656,7 +668,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_with_tools(cfg, messages, tools, principal_id, max_retries)
-                except (LLMBudgetExceededError, SamplingConfigurationError):
+                except (LLMBudgetExceededError, SamplingConfigurationError, litellm.exceptions.BadRequestError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -795,7 +807,7 @@ class LLMService:
                 )
                 # Issue #635: apply asyncio.wait_for with configured timeout
                 response = await asyncio.wait_for(
-                    litellm.acompletion(
+                    _acompletion(
                         model=model_str,
                         messages=cached_messages,
                         tools=cached_tools if cached_tools is not None else tools,
@@ -968,7 +980,7 @@ class LLMService:
             for idx, cfg in enumerate(configs_to_try):
                 try:
                     return await self._complete_text(cfg, messages, principal_id)
-                except (LLMBudgetExceededError, SamplingConfigurationError):
+                except (LLMBudgetExceededError, SamplingConfigurationError, litellm.exceptions.BadRequestError):
                     raise
                 except Exception as exc:
                     last_exc = exc
@@ -1018,7 +1030,7 @@ class LLMService:
             try:
                 # Issue #635: apply asyncio.wait_for with configured timeout
                 response = await asyncio.wait_for(
-                    litellm.acompletion(
+                    _acompletion(
                         model=model_str,
                         messages=cached_messages,
                         **_sampling_kwargs(config, model_str),

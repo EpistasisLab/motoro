@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from motoro.schemas.pattern import PatternConfig
 from motoro.services.model_capabilities import ModelCapabilities
+from motoro.services.provider_types import ModelInfo
 
 
 class LLMProvider(enum.StrEnum):
@@ -60,7 +61,11 @@ class ModelConfig(BaseModel):
     )
     resolved_capabilities: ModelCapabilities | None = Field(
         default=None,
-        description="Validated caller-resolved metadata for this model; overrides Motoro's registry.",
+        description="Explicit caller capability override; takes precedence over model_metadata.",
+    )
+    model_metadata: ModelInfo | None = Field(
+        default=None,
+        description="Discovered facts and provenance for this model; retain through serialization.",
     )
     max_tokens: int = Field(default=4096, gt=0, le=200000)
     api_base: str | None = Field(default=None, description="Custom API base URL (e.g., Foundry)")
@@ -102,6 +107,7 @@ class PartialModelConfig(BaseModel):
         default=None,
         description="Caller-resolved metadata for the effective model; see ModelConfig.resolved_capabilities.",
     )
+    model_metadata: ModelInfo | None = None
     max_tokens: int = Field(default=4096, gt=0, le=200000)
     api_base: str | None = Field(default=None, description="Custom API base URL (e.g., Foundry)")
     api_key: str | None = Field(

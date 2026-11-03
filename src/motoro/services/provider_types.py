@@ -97,7 +97,7 @@ class DefaultValue(BaseModel):
 
 
 class ModelDefaults(BaseModel):
-    """Advertised defaults, falling back to curated capability defaults.
+    """Advertised defaults with provenance; missing values remain unknown.
 
     Provider facts remain known independently of sampling support/validation.
     Other advertised defaults are in additional. Token limits are not defaults;
