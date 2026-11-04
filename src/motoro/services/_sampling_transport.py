@@ -14,6 +14,12 @@ from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler
 from motoro.services.sampling import SamplingConfigurationError
 
 
+def _uses_anthropic_messages(model: str) -> bool:
+    # Match LiteLLM's Azure AI router; other Foundry model families retain
+    # their OpenAI-compatible sampling fields and request adapter.
+    return model.startswith("anthropic/") or (model.startswith("azure_ai/") and "claude" in model.lower())
+
+
 class _AnthropicSamplingHTTPHandler(AsyncHTTPHandler):
     def __init__(self, delegate: AsyncHTTPHandler, sampling: dict[str, Any]) -> None:
         # The delegate owns the connection pool and its lifecycle.
@@ -80,7 +86,7 @@ class _BedrockSamplingHTTPHandler(_AnthropicSamplingHTTPHandler):
 
 async def acompletion(**kwargs: Any) -> Any:
     """Preserve sampling across native and structured completions."""
-    if str(kwargs.get("model", "")).startswith("anthropic/") and kwargs.get("extra_body"):
+    if _uses_anthropic_messages(str(kwargs.get("model", ""))) and kwargs.get("extra_body"):
         sampling = kwargs.pop("extra_body")
         delegate = kwargs.pop("client", None) or litellm.module_level_aclient
         kwargs["client"] = _AnthropicSamplingHTTPHandler(delegate, sampling)

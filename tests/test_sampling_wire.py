@@ -16,12 +16,16 @@ from motoro.services._sampling_transport import _BedrockSamplingHTTPHandler, aco
 from motoro.services.sampling import SamplingConfigurationError
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openai", "openrouter", "azure_foundry", "local"])
+@pytest.mark.parametrize("provider,claude_family", [
+    ("anthropic", True), ("openai", False), ("openrouter", False),
+    ("azure_foundry", False), ("azure_foundry", True), ("local", False),
+])
 @pytest.mark.parametrize("effort", ["medium", "max", "future-effort", None])
 @pytest.mark.parametrize("known_model", [False, True])
 async def test_native_sampling_reaches_provider_unchanged(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
+    claude_family: bool,
     effort: str | None,
     known_model: bool,
 ) -> None:
@@ -35,7 +39,7 @@ async def test_native_sampling_reaches_provider_unchanged(
 
     def respond(request: httpx.Request) -> httpx.Response:
         bodies.append(json.loads(request.content))
-        if provider == "anthropic":
+        if claude_family:
             return httpx.Response(
                 200,
                 json={
@@ -87,15 +91,16 @@ async def test_native_sampling_reaches_provider_unchanged(
         kwargs.setdefault(
             "client",
             AsyncOpenAI(api_key="mock-key", base_url="https://provider.test/v1", http_client=handler.client)
-            if provider in {"openai", "local"} or provider in {"openrouter", "azure_foundry"} and known_model
+            if provider in {"openai", "local"}
+            or provider in {"openrouter", "azure_foundry"} and known_model and not claude_family
             else handler,
         )
         return await original_completion(**kwargs, num_retries=0)
 
     monkeypatch.setattr(llm_service.litellm, "acompletion", completion)
-    model = "claude-haiku-5-5" if provider == "anthropic" else "future-model"
+    model = "claude-haiku-5-5" if claude_family else "future-model"
     if known_model:
-        model = "claude-opus-5" if provider == "anthropic" else "gpt-5.2"
+        model = "claude-opus-5" if claude_family else "gpt-5.2"
         if provider == "openrouter":
             model = "openai/gpt-5.2"
     config = ModelConfig(
@@ -114,7 +119,7 @@ async def test_native_sampling_reaches_provider_unchanged(
         assert not {"temperature", "reasoning", "reasoning_effort", "output_config"} & body.keys()
     else:
         assert body.get("temperature") == 0.7, body
-        if provider == "anthropic":
+        if claude_family:
             assert body["output_config"]["effort"] == effort
         elif provider == "openrouter":
             assert body["reasoning"]["effort"] == effort

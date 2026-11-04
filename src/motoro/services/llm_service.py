@@ -29,6 +29,7 @@ from motoro.observability.metrics import record_llm_call
 from motoro.observability.tracing import get_tracer
 from motoro.schemas.agent import LLMProvider, ModelConfig
 from motoro.schemas.llm import LLMCallRecord, LLMToolCall, ToolCompletion
+from motoro.services._sampling_transport import _uses_anthropic_messages
 from motoro.services._sampling_transport import acompletion as _acompletion
 from motoro.services.credential_scrubber import scrub as _scrub_creds
 from motoro.services.llm_errors import (
@@ -188,7 +189,7 @@ def _sampling_kwargs(config: ModelConfig, model_str: str) -> dict[str, Any]:
     if model_str.startswith("bedrock/"):
         return {**native, "drop_params": False, "allowed_openai_params": list(native)}
     if resolved.effort is not None:
-        if model_str.startswith("anthropic/"):
+        if _uses_anthropic_messages(model_str):
             native.pop("reasoning_effort")
             native["output_config"] = {"effort": resolved.effort}
         elif model_str.startswith("openrouter/"):
