@@ -84,7 +84,7 @@ async def test_explicit_unknown_settings_survive_every_path(
     assert len(request_stubs) == 1
     call = request_stubs[0]
     expected = {"temperature": 0, "reasoning_effort": effort}
-    if provider == "anthropic":
+    if provider in {"anthropic", "azure_foundry"}:
         expected = {"temperature": 0, "output_config": {"effort": effort}}
     elif provider == "openrouter":
         expected = {"temperature": 0, "reasoning": {"effort": effort}}
