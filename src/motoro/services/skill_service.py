@@ -366,6 +366,8 @@ async def create_skill(
     is_system: bool = False,
     source_filename: str | None = None,
     files: Iterable[tuple[str, str, str] | tuple[str, str]] = (),
+    db: AsyncSession | None = None,
+    identifier: uuid.UUID | None = None,
 ) -> Skill:
     """Persist a skill from already-separated fields.
 
@@ -374,8 +376,16 @@ async def create_skill(
     (rather than uploading a file) cannot bypass the format's rules. The same
     goes for *files*, whose paths run through :func:`validate_bundle_path` here
     and not only in :func:`parse_skill_bundle`.
+    A supplied *db* owns the transaction: this function flushes, but does not
+    commit or roll it back. *identifier* supports recoverable batch creation.
     """
+    if db is None:
+        async with _session("create_skill") as own_db:
+            return await create_skill(name=name, description=description, body=body, frontmatter=frontmatter,
+                owner_id=owner_id, is_system=is_system, source_filename=source_filename,
+                files=files, db=own_db, identifier=identifier)
     skill = Skill(
+        **({"id": identifier} if identifier is not None else {}),
         name=validate_skill_name(name.strip()),
         description=validate_skill_description(description),
         body=body.strip(),
@@ -393,10 +403,9 @@ async def create_skill(
             for index, item in enumerate(files)
         ],
     )
-    async with _session("create_skill") as db:
-        db.add(skill)
-        await db.commit()
-        await db.refresh(skill)
+    db.add(skill)
+    await db.flush()
+    await db.refresh(skill)
     return skill
 
 
@@ -406,6 +415,8 @@ async def create_skill_from_markdown(
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
     source_filename: str | None = None,
+    db: AsyncSession | None = None,
+    identifier: uuid.UUID | None = None,
 ) -> Skill:
     """Parse a ``SKILL.md`` document and persist it."""
     parsed = parse_skill_markdown(text)
@@ -417,6 +428,8 @@ async def create_skill_from_markdown(
         owner_id=owner_id,
         is_system=is_system,
         source_filename=source_filename,
+        db=db,
+        identifier=identifier,
     )
 
 
@@ -426,6 +439,8 @@ async def create_skill_from_bundle(
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
     source_filename: str | None = None,
+    db: AsyncSession | None = None,
+    identifier: uuid.UUID | None = None,
 ) -> Skill:
     """Parse a whole skill directory and persist it, bundled files and all.
 
@@ -443,6 +458,8 @@ async def create_skill_from_bundle(
         is_system=is_system,
         source_filename=source_filename,
         files=bundle.files,
+        db=db,
+        identifier=identifier,
     )
 
 
