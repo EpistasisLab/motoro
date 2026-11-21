@@ -305,6 +305,9 @@ async def register_server(
     owner_id: uuid.UUID | None = None,
     is_system: bool = False,
     registry: MCPServerRegistry | None = None,
+    db: AsyncSession | None = None,
+    identifier: uuid.UUID | None = None,
+    connect: bool = True,
 ) -> MCPServerConfig:
     """Validate, connect, and persist a new MCP server registration.
 
@@ -314,14 +317,19 @@ async def register_server(
     :func:`list_servers` always includes system rows alongside an owner's own,
     the same way a run resolves an ``is_system`` agent (``Agent.owner_id``
     docstring) regardless of who started it.
+    Pass *connect=False* to register a disconnected server without invoking
+    its transport. An optional *db* joins the caller's transaction and requires
+    deferred connection; only the transaction owner may commit or roll back.
     """
+    if db is not None and connect:
+        raise ValueError("Caller-owned MCP registration must defer connection until after commit")
     if is_system and owner_id is not None:
         raise ValueError("System MCP servers must be ownerless")
     _validate_registration(transport, command, url)
     _validate_auth_combination(transport, headers=headers, server_env=server_env)
 
     config = MCPServerConfig(
-        id=uuid.uuid4(),
+        id=identifier or uuid.uuid4(),
         name=name,
         transport=MCPTransport(transport),
         command=command,
@@ -339,16 +347,13 @@ async def register_server(
         owner_id=owner_id,
         is_system=is_system,
     )
-    async with _session("register_server") as db:
-        await _lock_server_name(db, name)
-        if await _name_conflicts(db, name=name, owner_id=owner_id, is_system=is_system):
-            _raise_name_conflict(name)
-        try:
-            db.add(config)
-            await db.commit()
-        except IntegrityError as exc:
-            await db.rollback()
-            raise MCPServerNameConflictError(f"MCP server name '{name}' is already in use in this namespace") from exc
+    if db is None:
+        async with _session("register_server") as own_db:
+            await _persist_registration(own_db, config)
+    else:
+        await _persist_registration(db, config)
+    if not connect:
+        return config
 
     reg = registry or get_registry()
     entry = await reg.register(**_registry_connection_kwargs(config, reg))
@@ -357,6 +362,18 @@ async def register_server(
         await _persist_connection_outcome(db, persisted, entry)
         await db.commit()
         return persisted
+
+
+async def _persist_registration(db: AsyncSession, config: MCPServerConfig) -> None:
+    await _lock_server_name(db, config.name)
+    if await _name_conflicts(db, name=config.name, owner_id=config.owner_id, is_system=config.is_system):
+        _raise_name_conflict(config.name)
+    try:
+        db.add(config)
+        await db.flush()
+    except IntegrityError as exc:
+        raise MCPServerNameConflictError(
+            f"MCP server name '{config.name}' is already in use in this namespace") from exc
 
 
 async def get_server(server_id: uuid.UUID) -> MCPServerConfig | None:
